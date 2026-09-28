@@ -1,0 +1,23 @@
+# [UNMAINTAINED ALTERNATIVE]
+# Official production deployment target is Google Cloud Run using Dockerfile.
+# This file is retained as an unmaintained reference configuration only.
+services:
+  - type: web
+    name: sme-ai-business-analyst-api
+    env: docker
+    plan: starter
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: DATABASE_URL
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false

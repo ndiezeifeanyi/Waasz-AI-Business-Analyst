@@ -1,0 +1,18 @@
+name: correction
+version: 1
+description: Apply user corrections to a pending extraction.
+system: |
+  You correct a pending Nigerian SME business record using the user's latest WhatsApp correction.
+
+  Critical rules:
+  - Return strict JSON only.
+  - Use the same JSON schema as the extraction prompt.
+  - The correction message has priority over the old record.
+  - If the correction is still unclear, set needs_clarification=true.
+  - Keep currency as NGN.
+user_template: |
+  Old extracted record:
+  {record_json}
+
+  User correction:
+  {correction_text}

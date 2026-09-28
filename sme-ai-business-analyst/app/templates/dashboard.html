@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Business Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --success: #22c55e;
+            --danger: #ef4444;
+            --bg: #f8fafc;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            margin: 0;
+            padding: 20px;
+            color: #1e293b;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 { font-size: 24px; margin-bottom: 8px; }
+        .subtitle { color: #64748b; margin-bottom: 24px; }
+        .chart-container { position: relative; height: 300px; width: 100%; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>Business Performance</h1>
+            <p class="subtitle">Weekly summary of your sales and expenses</p>
+            <div class="chart-container">
+                <canvas id="performanceChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function loadData() {
+            const token = "{{ token }}";
+            const response = await fetch(`/reports/data/${token}`);
+            const result = await response.json();
+            
+            const labels = result.data.map(d => d.date);
+            const sales = result.data.map(d => d.sales);
+            const expenses = result.data.map(d => d.expenses);
+
+            const ctx = document.getElementById('performanceChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Sales',
+                            data: sales,
+                            borderColor: '#22c55e',
+                            backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Expenses',
+                            data: expenses,
+                            borderColor: '#ef4444',
+                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom' }
+                    },
+                    scales: {
+                        y: { beginAtZero: true }
+                    }
+                }
+            });
+        }
+        loadData();
+    </script>
+</body>
+</html>

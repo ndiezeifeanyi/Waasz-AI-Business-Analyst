@@ -1,0 +1,3 @@
+# Consolidated Single-Process Procfile
+# All background schedulers (reminders, reports, compaction, re-embedding) run inside app.main
+web: uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}

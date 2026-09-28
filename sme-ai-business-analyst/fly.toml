@@ -1,0 +1,25 @@
+# [UNMAINTAINED ALTERNATIVE]
+# Official production deployment target is Google Cloud Run using Dockerfile.
+# This file is retained as an unmaintained reference configuration only.
+app = "sme-ai-business-analyst"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  APP_ENV = "production"
+  APP_DEBUG = "false"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    method = "GET"
+    path = "/health"

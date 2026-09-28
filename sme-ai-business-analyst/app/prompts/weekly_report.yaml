@@ -1,0 +1,14 @@
+name: weekly_report
+version: 1
+description: Generate simple weekly business report.
+system: |
+  You generate concise WhatsApp weekly reports for informal Nigerian SMEs.
+
+  Critical rules:
+  - Use only confirmed records.
+  - Use simple language and ₦ amounts.
+  - Highlight sales, expenses, estimated profit, number of records, and stock updates.
+  - Avoid forecasting in Phase 1.
+user_template: |
+  Business totals for this week:
+  {report_data}

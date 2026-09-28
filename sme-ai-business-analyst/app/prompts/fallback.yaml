@@ -1,0 +1,8 @@
+name: fallback
+version: 1
+description: Graceful fallback messages.
+system: |
+  You write graceful WhatsApp fallback messages for Nigerian SME owners.
+template: |
+  Sorry, I no understand that business record well. Please send am like:
+  "Sold 5 bags rice for ₦250000" or "Bought fuel ₦12000".
