@@ -33,6 +33,7 @@ from app.models.user import User
 from app.schemas.extraction import ExtractedRecord
 from app.services.ai_client import AiClient
 from app.services.ai_extraction import AiExtractionService
+from app.services.analytics_service import AnalyticsService
 from app.services.confirmation_service import build_confirmation_text, ConfirmationService
 from app.services.goal_service import GoalService
 from app.services.image_service import ImageService
@@ -75,6 +76,100 @@ class SetItemCostInput(BaseModel):
     model_config = {"title": "set_item_cost"}
     item_name: str = Field(description="Name of the product or inventory item, e.g. 'rice', 'cement', 'cooking oil'")
     unit_cost: float = Field(description="Cost price (COGS) per single unit in Naira (NGN), e.g. 32000 for ₦32,000 per bag")
+
+
+class SetReorderThresholdInput(BaseModel):
+    """Set an optional reorder threshold (low-stock alert level) for an inventory item (e.g. 'alert me when rice drops below 5 bags'). When inventory drops to or below this quantity after a sale, a proactive low-stock alert is generated."""
+    model_config = {"title": "set_reorder_threshold"}
+    item_name: str = Field(description="Name of the inventory item, e.g. 'rice', 'cement'")
+    threshold: float = Field(description="Minimum quantity threshold below which to alert the owner, e.g. 5 for 5 bags")
+
+
+class GenerateReceiptInput(BaseModel):
+    """Generate and deliver an official PDF receipt (for cash/transfer sale) or invoice (for credit sale) directly to the user's WhatsApp. Call immediately whenever the user requests a receipt (e.g. 'generate my receipt', 'send receipt', 'receipt please') without asking redundant questions."""
+    model_config = {"title": "generate_receipt"}
+    transaction_id: str | None = Field(default=None, description="Optional UUID of the specific transaction. Leave None/omitted to automatically use the most recent confirmed sale.")
+
+
+class SetReceiptTemplateInput(BaseModel):
+    """Set or initialize the persistent business receipt and invoice template (business name, address, contact phone, contact email, payment terms, footer note). This ensures all future receipts and invoices automatically carry professional branding."""
+    model_config = {"title": "set_receipt_template"}
+    business_display_name: str = Field(description="Official business name to print at the top of receipts and invoices.")
+    contact_phone: str = Field(description="Business contact phone number for receipts.")
+    address: str | None = Field(default=None, description="Physical store or office address (e.g. '12 Commercial Avenue, Yaba, Lagos').")
+    contact_email: str | None = Field(default=None, description="Optional business email address.")
+    payment_terms_note: str | None = Field(default=None, description="Optional payment terms or bank details (e.g. 'Payment due within 7 days to GTBank 0123456789').")
+    footer_note: str | None = Field(default=None, description="Optional custom footer message (e.g. 'No refund after 3 days. Thanks for your patronage!').")
+    business_logo: str | None = Field(default=None, description="Optional URL or identifier of the business logo.")
+
+
+class UpdateReceiptTemplateInput(BaseModel):
+    """Update specific fields of the existing business receipt and invoice template (e.g. 'change my business address on receipts', 'update phone number on receipts'). Modifies only specified fields on the single existing template."""
+    model_config = {"title": "update_receipt_template"}
+    business_display_name: str | None = Field(default=None, description="Updated business name.")
+    contact_phone: str | None = Field(default=None, description="Updated contact phone number.")
+    address: str | None = Field(default=None, description="Updated physical address.")
+    contact_email: str | None = Field(default=None, description="Updated business email.")
+    payment_terms_note: str | None = Field(default=None, description="Updated payment terms or bank details.")
+    footer_note: str | None = Field(default=None, description="Updated custom footer note.")
+    business_logo: str | None = Field(default=None, description="Updated business logo URL or identifier.")
+
+
+class ListOutstandingDebtsInput(BaseModel):
+    """List all unpaid customer debts, who owes what, amounts, due dates, and overdue status."""
+    model_config = {"title": "list_outstanding_debts"}
+    customer_name: str | None = Field(default=None, description="Optional customer name to filter debts for a specific person.")
+
+
+class MarkDebtPaidInput(BaseModel):
+    """Record a customer payment and mark an outstanding debt as paid in full or partially paid."""
+    model_config = {"title": "mark_debt_paid"}
+    customer_name: str | None = Field(default=None, description="Name of the customer who made the payment.")
+    amount_or_debt_id: str | None = Field(default=None, description="Debt UUID or payment amount in Naira, e.g. '50000' or UUID string.")
+
+
+class DraftPaymentReminderInput(BaseModel):
+    """Draft a courteous, ready-to-forward payment reminder message text for the business owner to review and forward to their debtor customer. NEVER sends directly to the customer."""
+    model_config = {"title": "draft_payment_reminder"}
+    customer_name: str = Field(description="Name of the customer who owes money.")
+
+
+class GetMarginReportInput(BaseModel):
+    """Retrieve gross margin audit (revenue, COGS, profit, and margin %) per-item or overall for a given time period. Use when the user asks 'what is my margin on rice', 'show my profit margins', or wants a margin report."""
+    model_config = {"title": "get_margin_report"}
+    period: str = Field(default="this_month", description="Period to analyze: 'today', 'this_week', 'this_month', 'last_30_days', 'all_time'")
+    item_name: str | None = Field(default=None, description="Optional specific item name to audit margin for (e.g. 'rice', 'cement')")
+
+
+class GetProductPerformanceAnalysisInput(BaseModel):
+    """Perform Pareto 80/20 analysis ranking top revenue drivers and detect dead stock (unsold inventory tying up working capital). Use when the user asks 'what are my best selling products', '80/20 analysis', or 'do I have dead stock'."""
+    model_config = {"title": "get_product_performance_analysis"}
+    period: str = Field(default="this_month", description="Period to analyze: 'today', 'this_week', 'this_month', 'last_30_days', 'all_time'")
+
+
+class SimulatePricingInput(BaseModel):
+    """Deterministically simulate pricing scenarios: compute resulting margin under a discount, or the exact price needed to hit a target gross margin. Never guess or hallucinate numbers."""
+    model_config = {"title": "simulate_pricing"}
+    item_name: str = Field(description="Name of the product or item to simulate pricing for (e.g. 'Rice', 'Cement')")
+    discount_pct: float | None = Field(default=None, description="Discount percentage to test (e.g. 10 for 10% off)")
+    target_margin_pct: float | None = Field(default=None, description="Target gross margin percentage (e.g. 25 for 25% margin)")
+    current_price: float | None = Field(default=None, description="Current selling price in Naira if known or overriding recent sales")
+
+
+class LogUpcomingPayableInput(BaseModel):
+    """Log an upcoming supplier bill, vendor payable, or expense due in the future. Feeds into cash flow shortfall forecasting."""
+    model_config = {"title": "log_upcoming_payable"}
+    amount: float = Field(description="Monetary amount due in Naira (NGN), e.g. 150000 for ₦150,000")
+    due_date: str = Field(description="Payment due date in YYYY-MM-DD format (e.g. '2026-10-15')")
+    description: str = Field(description="Description of what is owed (e.g. '50 cartons of noodles from supplier', 'Shop rent')")
+    vendor_name: str | None = Field(default=None, description="Optional name of supplier or vendor")
+
+
+class GetCashFlowForecastInput(BaseModel):
+    """Generate a cash flow forecast comparing trailing average sales against upcoming payables to identify potential cash shortfalls."""
+    model_config = {"title": "get_cash_flow_forecast"}
+    trailing_days: int = Field(default=30, description="Number of past days of sales history to baseline daily revenue (default 30)")
+    horizon_days: int = Field(default=14, description="Forecast horizon in days looking ahead (default 14)")
 
 
 class CreateReminderInput(BaseModel):
@@ -145,6 +240,18 @@ class GetHistoricalSummaryInput(BaseModel):
 AGENT_TOOLS = [
     RecordTransactionInput,
     SetItemCostInput,
+    SetReorderThresholdInput,
+    GenerateReceiptInput,
+    SetReceiptTemplateInput,
+    UpdateReceiptTemplateInput,
+    ListOutstandingDebtsInput,
+    MarkDebtPaidInput,
+    DraftPaymentReminderInput,
+    GetMarginReportInput,
+    GetProductPerformanceAnalysisInput,
+    SimulatePricingInput,
+    LogUpcomingPayableInput,
+    GetCashFlowForecastInput,
     CreateReminderInput,
     GenerateReportInput,
     GetHistoricalSummaryInput,
@@ -202,6 +309,7 @@ class AgentService:
         image_service: ImageService | None = None,
         live_info_service: LiveInformationService | None = None,
         media_downloader: MediaDownloader | None = None,
+        analytics: AnalyticsService | None = None,
     ) -> None:
         self.ledger = ledger or LedgerService()
         self.extractor = extractor or AiExtractionService()
@@ -217,6 +325,7 @@ class AgentService:
         self.image_service = image_service or ImageService(cost_monitor=self.ai_client.cost_monitor)
         self.live_info_service = live_info_service or LiveInformationService(cost_monitor=self.ai_client.cost_monitor)
         self.media_downloader = media_downloader or MediaDownloader()
+        self.analytics = analytics or AnalyticsService()
         self._recent_image_cache: dict[UUID, tuple[bytes, str]] = {}
 
     def _build_system_prompt(self, business: Business, user: User, now_utc: datetime, business_tz: str) -> str:
@@ -242,7 +351,7 @@ class AgentService:
             "- OVERDUE OR PASSED REMINDERS: If a reminder time requested in the past has already passed, DO NOT proactively bring it up, nag, or ask if the user wants to reschedule it. Only discuss a reminder if the user is currently asking about it.\n"
             "- When the user sends a greeting (e.g. 'Hi', 'Hey', 'Good morning'), reply ONLY with a warm, natural greeting. NEVER attach questions or follow-ups about earlier sales, expenses, reminders, or tasks.\n\n"
             "### AUTHORITATIVE CAPABILITIES (YOU HAVE DIRECT ACCESS TO THESE VIA TOOLS):\n"
-            "You have real, working tool access. NEVER claim you cannot perform these actions:\n"
+            "You have real, working tool access. NEVER claim you cannot perform these actions, NEVER claim you lack PDF generation, and NEVER tell the user you cannot create documents or track debts:\n"
             "1. Reminders & Alarms: You CAN schedule reminders for any relative or absolute time using the `create_reminder` tool. Never tell the user to use their phone's clock or alarm app.\n"
             "2. Sales & Expenses: You CAN stage sales and expenses into the ledger using the `record_transaction` tool (amount in Naira is mandatory). If an amount is missing, ask for it naturally.\n"
             "3. Reports: You CAN generate weekly and monthly summary reports using `generate_report`.\n"
@@ -250,6 +359,25 @@ class AgentService:
             "5. Goals: You CAN record and track milestones using `manage_goal`.\n"
             "6. Image Generation & Editing: You CAN generate new images using `generate_image` and edit existing images using `edit_image`. Both tools deliver images directly to WhatsApp. You must NOT generate images of real, identifiable people.\n"
             "7. Live/Current Information: You CAN search for and retrieve real-time facts, news, today's events, sports scores, and current prices using `get_current_information`. Always invoke this tool for anything that requires current live knowledge or may have changed recently. NEVER guess or fabricate current information from stale training data.\n"
+            "8. Instant PDF Receipts & Invoices: You CAN generate official, downloadable PDF receipts (for cash/transfer sales) and PDF invoices (for credit sales) directly to WhatsApp using `generate_receipt`. When asked 'can you generate a PDF?', 'can you create receipts?', or similar, ALWAYS confirm affirmatively and enthusiastically that you CAN generate downloadable PDF receipts and invoices for any sale or transaction. CRITICAL ACTION FOR RECEIPTS: Whenever the user says 'generate my receipt', 'send receipt', 'give me receipt', or asks for a receipt after recording a sale, DO NOT ask them to repeat the sale details or amount — call `generate_receipt(transaction_id=None)` to produce and dispatch the PDF receipt. PERSISTENT TEMPLATES: Businesses have a persistent receipt template (business name, address, phone, email, payment terms). If `generate_receipt` returns a notice that no template exists yet, or if a user wants to set up their receipts, guide them conversationally to provide their business display name, address, and phone number, then save it using `set_receipt_template`. If they want to change their address or details later, use `update_receipt_template`.\n"
+            "9. Debt Tracking & Customer Reminders: You CAN track customer debts, record credit sales with due dates, list outstanding debtors using `list_outstanding_debts`, mark debts as paid using `mark_debt_paid`, and draft courteous ready-to-forward payment reminders for the owner using `draft_payment_reminder`. Always mention debt tracking when asked what you can do.\n"
+            "10. Low-Stock Alerts & Inventory Tracking: You CAN track inventory quantities, set reorder threshold alerts using `set_reorder_threshold(item_name, threshold)`, and deliver proactive low-stock alerts when stock drops to or below the reorder threshold after a sale.\n"
+            "11. Unit Cost & Profit Margin Auditing: You CAN set item cost price (COGS) using `set_item_cost(item_name, unit_cost)` and audit profit margins per-item or across the business using `get_margin_report` (e.g. 'what is my margin on rice?').\n"
+            "12. 80/20 Pareto Analysis & Dead Stock Detection: You CAN identify top 80% revenue-driving products and detect dead stock tying up working capital using `get_product_performance_analysis`.\n"
+            "13. Deterministic Pricing Simulation: You CAN simulate discount effects on profit margins and calculate exact required prices for target margins using `simulate_pricing` (deterministic math).\n"
+            "14. Cash Flow Forecasting & Payables: You CAN log upcoming supplier payables or bills using `log_upcoming_payable` and predict cash flow shortfalls using `get_cash_flow_forecast`.\n\n"
+            "### DATA PERMANENCE, CONTINUITY & ACCOUNT RECOVERY RULES:\n"
+            "- DATA IS PERMANENT & CLOUD-SECURED: All sales, expenses, debts, inventory, and business records are permanently stored in our secure encrypted cloud database and tied directly to the user's registered phone number — NOT to local phone storage, NOT to WhatsApp cloud backup, and NOT to a WhatsApp login session.\n"
+            "- SAME PHONE NUMBER: If a user changes phones, reinstalls WhatsApp, or loses their physical device, their entire business history is immediately intact as soon as they message in from their SAME registered phone number.\n"
+            "- CHANGING PHONE NUMBERS (CRITICAL PRODUCTION RULE): If a user changes or loses their phone number, recovery is NEVER automatic! The bot must NEVER claim, promise, or imply that records automatically move or transfer to a new phone number. To protect business security, transferring an account to a new phone number strictly requires admin-assisted account recovery where support verifies their identity and relinks their business profile and transaction history to the new number. Advise them to contact support/admin if they ever plan to switch phone numbers.\n"
+            "- ANSWERING 'WILL MY DATA DISAPPEAR?' / DATA SAFETY QUESTIONS: When the user asks 'how do I know my data won't just disappear?', 'what happens if I lose my phone?', or asks about data safety, explain clearly and accurately:\n"
+            "  1. Their data is permanently saved in the secure cloud database, not stored on their local phone.\n"
+            "  2. Their account is permanently tied to their registered phone number (+ their country code).\n"
+            "  3. Even if they lose or switch their physical phone, all records remain intact as long as they keep their phone number.\n"
+            "  4. If they ever change to a NEW phone number, their data is not lost, but they must contact admin/support for an admin-assisted account recovery to verify ownership and relink their business history to the new number.\n"
+            "  NEVER say 'once you log back into WhatsApp your data is restored' or reference WhatsApp backup.\n\n"
+            "### IMPORTANT GUARDRAIL (CUSTOMER OUTREACH & DEBT REMINDERS):\n"
+            "- Waasz can draft a payment-reminder message for the business owner to review and send themselves, but must NEVER send WhatsApp messages directly to a customer's phone number on the business's behalf. That customer never opted into this bot, and unsolicited business-initiated outreach to a number that hasn't messaged in is both a WhatsApp policy risk and a real consent problem. The reminder is always delivered back to the OWNER, for the owner to forward themselves.\n\n"
             "### IMAGE & RECEIPT UNDERSTANDING:\n"
             "- When an image is attached to the conversation:\n"
             "  * RECEIPT / INVOICE / EXPENSE: If the photo depicts a receipt, invoice, bill, POS receipt, transfer receipt, or expense document with monetary amounts, extract the transaction details (type 'sale' or 'expense', amount in Naira, item_name, description) and call the `record_transaction` tool to stage it for interactive confirmation.\n"
@@ -551,6 +679,9 @@ class AgentService:
                 quantity_val = tool_args.get("quantity")
                 unit = tool_args.get("unit")
                 description = tool_args.get("description")
+                is_credit = bool(tool_args.get("is_credit"))
+                customer_name = tool_args.get("customer_name")
+                due_date = tool_args.get("due_date")
 
                 if not amount_val or float(amount_val) <= 0:
                     return "Error: Missing valid amount. Ask the user for the amount in Naira.", False
@@ -568,6 +699,9 @@ class AgentService:
                     currency="NGN",
                     confidence=0.95,
                     needs_clarification=False,
+                    is_credit=is_credit,
+                    customer_name=customer_name,
+                    due_date=due_date,
                 )
 
                 extraction = await self.ledger.create_ai_extraction(
@@ -605,6 +739,196 @@ class AgentService:
                 )
                 confirmation.confirmation_message_id = outbound.id
                 return f"Success: Transaction staged for confirmation with text '{conf_text}'. Interactive buttons delivered to user.", True
+
+            elif tool_name == "set_item_cost":
+                item_name = tool_args.get("item_name")
+                unit_cost = tool_args.get("unit_cost")
+                if not item_name or unit_cost is None:
+                    return "Error: item_name and unit_cost are required.", False
+                item = await self.ledger.set_item_cost(db, business.id, item_name, unit_cost)
+                return f"Success: Unit cost (COGS) for '{item.item_name}' set to ₦{item.unit_cost:,.2f}.", False
+
+            elif tool_name == "set_reorder_threshold":
+                item_name = tool_args.get("item_name")
+                threshold = tool_args.get("threshold")
+                if not item_name or threshold is None:
+                    return "Error: item_name and threshold are required.", False
+                item = await self.ledger.set_reorder_threshold(db, business.id, item_name, threshold)
+                return f"Success: Reorder threshold for '{item.item_name}' set to {threshold:g}. You will be alerted when stock falls to or below this level.", False
+
+            elif tool_name == "set_receipt_template":
+                from app.services.receipt_service import ReceiptService
+                receipt_svc = ReceiptService()
+                biz_name = tool_args.get("business_display_name")
+                phone = tool_args.get("contact_phone")
+                addr = tool_args.get("address")
+                logo = tool_args.get("business_logo")
+                email = tool_args.get("contact_email")
+                terms = tool_args.get("payment_terms_note")
+                footer = tool_args.get("footer_note")
+                if not biz_name or not phone:
+                    return "Error: business_display_name and contact_phone are required.", False
+                tmpl = await receipt_svc.set_template(
+                    db,
+                    business_id=business.id,
+                    business_display_name=biz_name,
+                    contact_phone=phone,
+                    address=addr,
+                    business_logo=logo,
+                    contact_email=email,
+                    payment_terms_note=terms,
+                    footer_note=footer,
+                )
+                return (
+                    f"Success: Receipt template saved! Future receipts and invoices will automatically feature '{tmpl.business_display_name}', address '{tmpl.address or 'N/A'}', and phone '{tmpl.contact_phone}'.",
+                    False,
+                )
+
+            elif tool_name == "update_receipt_template":
+                from app.services.receipt_service import ReceiptService
+                receipt_svc = ReceiptService()
+                clean_args = {k: v for k, v in tool_args.items() if v is not None}
+                tmpl = await receipt_svc.update_template(
+                    db,
+                    business_id=business.id,
+                    **clean_args,
+                )
+                if not tmpl:
+                    biz_name = tool_args.get("business_display_name") or business.name
+                    phone = tool_args.get("contact_phone") or business.phone_number or ""
+                    tmpl = await receipt_svc.set_template(
+                        db,
+                        business_id=business.id,
+                        business_display_name=biz_name,
+                        contact_phone=phone,
+                        **clean_args,
+                    )
+                return (
+                    f"Success: Receipt template updated! Stored branding for '{tmpl.business_display_name}' has been refreshed.",
+                    False,
+                )
+
+            elif tool_name == "generate_receipt":
+                from app.services.receipt_service import ReceiptService
+                receipt_svc = ReceiptService()
+                tmpl = await receipt_svc.get_template(db, business.id)
+                if not tmpl:
+                    return (
+                        "Notice: No receipt template found for this business. "
+                        "Before generating their first receipt/invoice, ask the user conversationally "
+                        "for their business details (Business Name, store/office address, and contact phone number, "
+                        "plus optional email or payment terms) so we can brand all their receipts professionally. "
+                        "Once they reply, save it with set_receipt_template and then generate the receipt.",
+                        False,
+                    )
+                tx_id_str = tool_args.get("transaction_id")
+                target_tx_id = UUID(tx_id_str) if tx_id_str else None
+                try:
+                    pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
+                        db, business_id=business.id, transaction_id=target_tx_id
+                    )
+                    caption = f"📄 {'Invoice' if tx.is_credit else 'Receipt'} #{filename.replace('.pdf', '')}"
+                    send_res = await self.whatsapp.send_document_bytes(
+                        user.phone_number, pdf_bytes, filename=filename, caption=caption
+                    )
+                    await self.ledger.record_outbound_message(
+                        db, business.id, user.phone_number, f"[Sent document {filename}]", send_res, user_id=user.id
+                    )
+                    doc_type = "Invoice" if tx.is_credit else "Receipt"
+                    return f"Success: {doc_type} PDF '{filename}' generated and delivered to user's WhatsApp.", False
+                except ValueError as ve:
+                    return f"Error: {str(ve)}", False
+                except Exception as exc:
+                    return f"Error generating receipt: {str(exc)}", False
+
+            elif tool_name == "list_outstanding_debts":
+                cust_filter = tool_args.get("customer_name")
+                from app.services.debt_service import DebtService
+                debt_svc = DebtService()
+                debts = await debt_svc.list_outstanding_debts(db, business.id, customer_name=cust_filter)
+                summary = debt_svc.format_debts_summary(debts, customer_filter=cust_filter)
+                return summary, False
+
+            elif tool_name == "mark_debt_paid":
+                cust_name = tool_args.get("customer_name")
+                amt_or_id = tool_args.get("amount_or_debt_id")
+                from app.services.debt_service import DebtService
+                debt_svc = DebtService()
+                debt, msg = await debt_svc.mark_debt_paid(
+                    db, business.id, customer_name=cust_name, amount_or_debt_id=amt_or_id
+                )
+                return msg, False
+
+            elif tool_name == "draft_payment_reminder":
+                cust_name = tool_args.get("customer_name")
+                if not cust_name:
+                    return "Error: customer_name is required.", False
+                from app.services.debt_service import DebtService
+                debt_svc = DebtService()
+                draft = await debt_svc.draft_payment_reminder(db, business.id, customer_name=cust_name)
+                return draft, False
+
+            elif tool_name == "get_margin_report":
+                period = tool_args.get("period") or "this_month"
+                item_name = tool_args.get("item_name")
+                res = await self.analytics.get_margin_report(
+                    db, business_id=business.id, period=period, item_name=item_name
+                )
+                return res["summary_text"], False
+
+            elif tool_name == "get_product_performance_analysis":
+                period = tool_args.get("period") or "this_month"
+                res = await self.analytics.get_product_performance_analysis(
+                    db, business_id=business.id, period=period
+                )
+                return res["summary_text"], False
+
+            elif tool_name == "simulate_pricing":
+                item_name = tool_args.get("item_name")
+                if not item_name:
+                    return "Error: item_name is required.", False
+                discount_pct = tool_args.get("discount_pct")
+                target_margin = tool_args.get("target_margin_pct")
+                current_price = tool_args.get("current_price")
+                res = await self.analytics.simulate_pricing(
+                    db,
+                    business_id=business.id,
+                    item_name=item_name,
+                    discount_pct=discount_pct,
+                    target_margin_pct=target_margin,
+                    current_price=current_price,
+                )
+                return res["summary_text"], False
+
+            elif tool_name == "log_upcoming_payable":
+                amount = tool_args.get("amount")
+                if not amount or float(amount) <= 0:
+                    return "Error: amount is required and must be greater than zero.", False
+                due_date = tool_args.get("due_date")
+                if not due_date:
+                    return "Error: due_date is required in YYYY-MM-DD format.", False
+                description = tool_args.get("description") or "Payable bill"
+                vendor = tool_args.get("vendor_name")
+                payable, msg = await self.analytics.log_upcoming_payable(
+                    db,
+                    business_id=business.id,
+                    amount=Decimal(str(amount)),
+                    due_date=due_date,
+                    description=description,
+                    vendor_name=vendor,
+                )
+                return msg, False
+
+            elif tool_name == "get_cash_flow_forecast":
+                trailing_days = int(tool_args.get("trailing_days") or 30)
+                horizon_days = int(tool_args.get("horizon_days") or 14)
+                forecast = await self.analytics.get_cash_flow_forecast(
+                    db,
+                    business_id=business.id,
+                    trailing_days=trailing_days,
+                    horizon_days=horizon_days,
+                )
+                return forecast["summary_text"], False
 
             elif tool_name == "generate_report":
                 cadence = tool_args.get("cadence") or "weekly"

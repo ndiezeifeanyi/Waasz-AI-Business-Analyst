@@ -14,6 +14,8 @@ from app.models.invite_code import InviteCode, Waitlist
 from app.models.magic_link import MagicLink
 from app.models.media import MediaAsset
 from app.models.message import WhatsAppMessage
+from app.models.payable import Payable
+from app.models.receipt_template import ReceiptTemplate
 from app.models.report import BusinessReport
 from app.models.task import Task
 from app.models.transaction import Transaction
@@ -38,6 +40,8 @@ __all__ = [
     "InviteCode",
     "MagicLink",
     "MediaAsset",
+    "Payable",
+    "ReceiptTemplate",
     "Task",
     "Transaction",
     "User",
