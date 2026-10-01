@@ -9,6 +9,7 @@ from app.models.cost import AiCostEvent
 from app.models.customer import Customer
 from app.models.debt import Debt
 from app.models.extraction import AiExtraction
+from app.models.google_drive_integration import GoogleDriveIntegration
 from app.models.inventory import InventoryItem, InventoryMovement
 from app.models.invite_code import InviteCode, Waitlist
 from app.models.magic_link import MagicLink
@@ -35,6 +36,7 @@ __all__ = [
     "Correction",
     "Customer",
     "Debt",
+    "GoogleDriveIntegration",
     "InventoryItem",
     "InventoryMovement",
     "InviteCode",

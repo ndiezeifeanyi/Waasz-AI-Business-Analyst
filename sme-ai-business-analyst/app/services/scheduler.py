@@ -144,6 +144,19 @@ class ReportScheduler:
             sent = await self.unified_reports.dispatch_scheduled_reports(db, cadence="yearly")
             logger.info("Dispatched %d yearly reports", sent)
 
+    async def run_monthly_google_drive_backups(self) -> dict:
+        """Monthly scheduled job: for each business with Google Drive connected, export monthly PDF and upload."""
+        now_utc = datetime.now(UTC)
+        self.last_run_times["dispatch_monthly_google_drive_backups"] = now_utc.isoformat()
+        try:
+            from app.services.google_drive_service import GoogleDriveService
+            drive_svc = GoogleDriveService()
+            async with async_session_factory() as session:
+                return await drive_svc.run_all_monthly_backups(session)
+        except Exception as exc:
+            logger.exception("Monthly Google Drive backup job failed at %s: %s", now_utc.isoformat(), exc)
+            return {"status": "error", "error": str(exc)}
+
     def start(self) -> None:
         self.scheduler.add_job(
             self.run_daily_unified_reports,
@@ -167,6 +180,15 @@ class ReportScheduler:
                 hour=settings.daily_report_hour_local,
             ),
             id="dispatch_monthly_unified_reports",
+            replace_existing=True,
+        )
+        self.scheduler.add_job(
+            self.run_monthly_google_drive_backups,
+            CronTrigger(
+                day=1,
+                hour=settings.daily_report_hour_local,
+            ),
+            id="dispatch_monthly_google_drive_backups",
             replace_existing=True,
         )
         self.scheduler.add_job(

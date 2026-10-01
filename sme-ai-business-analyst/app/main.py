@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from app.api.routes import admin, client_dashboard, health, whatsapp
+from app.api.routes import admin, client_dashboard, google_drive, health, whatsapp
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.security_middleware import setup_security_middleware
@@ -50,6 +50,7 @@ def create_app() -> FastAPI:
     app.include_router(whatsapp.router, prefix="/webhooks/whatsapp", tags=["whatsapp"])
     app.include_router(admin.router, prefix="/admin", tags=["admin"])
     app.include_router(client_dashboard.router)
+    app.include_router(google_drive.router)
 
     # Root info route with webhook handshake fallback
     @app.get("/", tags=["info"])

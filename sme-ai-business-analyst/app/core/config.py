@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     tesseract_cmd: str = ""
     media_download_dir: str = "local_media"
 
+    # Google Drive Integration & Backups
+    google_drive_onboarding_mode: Literal["optional", "mandatory"] = "optional"
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_oauth_redirect_uri: str = "http://localhost:8000/api/v1/integrations/google-drive/callback"
+
     # Cost Limits
     daily_ai_spend_limit_usd: float = Field(default=5.0, ge=0)
     monthly_ai_spend_limit_usd: float = Field(default=100.0, ge=0)

@@ -28,14 +28,16 @@ async def cleanup_compliance_test_records():
     from app.models.debt import Debt
     from app.models.customer import Customer
     from app.models.receipt_template import ReceiptTemplate
+    from app.models.google_drive_integration import GoogleDriveIntegration
 
     test_phones = [normalize_phone(f"+234805555500{i}") for i in range(1, 10)] + [
         normalize_phone(f"+234805555600{i}") for i in range(1, 10)
-    ]
+    ] + [normalize_phone(f"+234805555700{i}") for i in range(1, 10)]
 
     async def _do_cleanup():
         async with async_session_factory() as session:
             biz_ids_subq = select(Business.id).where(Business.phone_number.in_(test_phones))
+            await session.execute(delete(GoogleDriveIntegration).where(GoogleDriveIntegration.business_id.in_(biz_ids_subq)))
             await session.execute(delete(ReceiptTemplate).where(ReceiptTemplate.business_id.in_(biz_ids_subq)))
             await session.execute(delete(Activity).where(Activity.business_id.in_(biz_ids_subq)))
             await session.execute(delete(Transaction).where(Transaction.business_id.in_(biz_ids_subq)))
@@ -700,4 +702,322 @@ async def test_phase3_cross_tenant_isolation_receipt_templates():
         assert "Alpha Superstore Nigeria" not in text_b
         assert "Maitama, Abuja" not in text_b
         assert "+2348011111111" not in text_b
+
+
+@pytest.mark.asyncio
+async def test_phase4_unconnected_business_unaffected():
+    """
+    Assert that a business without Drive connected is completely unaffected:
+    - Normal operations run without error
+    - export_monthly_backup_for_business gracefully skips
+    - run_all_monthly_backups completes cleanly
+    """
+    from app.services.google_drive_service import GoogleDriveService
+
+    phone = "+2348055557001"
+    norm_phone = normalize_phone(phone)
+
+    async with async_session_factory() as session:
+        biz = Business(name="Plain Local Business", phone_number=norm_phone)
+        session.add(biz)
+        await session.flush()
+
+        user = User(business_id=biz.id, phone_number=norm_phone, role="owner")
+        session.add(user)
+        await session.commit()
+
+        drive_svc = GoogleDriveService()
+        result = await drive_svc.export_monthly_backup_for_business(session, biz.id)
+        assert result["status"] == "skipped"
+        assert result["reason"] == "Drive not connected"
+
+        all_res = await drive_svc.run_all_monthly_backups(session)
+        assert "total" in all_res
+        assert all_res["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_phase4_oauth_connect_and_encrypted_token_storage():
+    """
+    Assert Google Drive OAuth flow:
+    - Auth URL requests least-privilege drive.file scope
+    - State encrypts and preserves business_id
+    - Refresh token is encrypted at rest using SECRET_KEY-based Fernet encryption
+    - Decryption reproduces the exact original token
+    """
+    from app.models.google_drive_integration import GoogleDriveIntegration
+    from app.services.google_drive_service import GoogleDriveService
+
+    phone = "+2348055557002"
+    norm_phone = normalize_phone(phone)
+
+    async with async_session_factory() as session:
+        biz = Business(name="Secure Backup Co", phone_number=norm_phone)
+        session.add(biz)
+        await session.flush()
+
+        user = User(business_id=biz.id, phone_number=norm_phone, role="owner")
+        session.add(user)
+        await session.commit()
+
+        drive_svc = GoogleDriveService()
+
+        # 1. Auth URL and state verification
+        auth_url = drive_svc.generate_auth_url(biz.id, user.id)
+        assert "drive.file" in auth_url
+        assert "response_type=code" in auth_url
+        assert "access_type=offline" in auth_url
+
+        state_str = auth_url.split("state=")[1].split("&")[0]
+        parsed_state = drive_svc.parse_state(state_str)
+        assert parsed_state["business_id"] == str(biz.id)
+        assert parsed_state["user_id"] == str(user.id)
+
+        # 2. Token exchange and encrypted storage
+        raw_refresh_token = "1//04_secret_test_refresh_token_xyz"
+        mock_token_resp = MagicMock()
+        mock_token_resp.status_code = 200
+        mock_token_resp.json.return_value = {
+            "access_token": "ya29.test_access_token_123",
+            "refresh_token": raw_refresh_token,
+            "expires_in": 3600,
+        }
+
+        mock_userinfo_resp = MagicMock()
+        mock_userinfo_resp.status_code = 200
+        mock_userinfo_resp.json.return_value = {"email": "owner@securebackup.com"}
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, \
+             patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+            mock_post.return_value = mock_token_resp
+            mock_get.return_value = mock_userinfo_resp
+
+            integration = await drive_svc.exchange_code_and_store(
+                db=session,
+                code="test_auth_code_abc",
+                state=state_str,
+            )
+
+            assert integration.is_active is True
+            assert integration.connected_email == "owner@securebackup.com"
+            # Ensure encrypted at rest (not stored in plain text!)
+            assert integration.encrypted_refresh_token != raw_refresh_token
+            # Verify clean decryption with SECRET_KEY
+            decrypted = drive_svc.decrypt_token(integration.encrypted_refresh_token)
+            assert decrypted == raw_refresh_token
+
+
+@pytest.mark.asyncio
+async def test_phase4_monthly_backup_upload_for_connected_business():
+    """
+    Assert that a connected business gets their monthly PDF report uploaded to their Drive folder:
+    - Finds or creates 'Waasz Backups - {Business Name}' folder
+    - Generates and uploads monthly PDF via multipart upload
+    - Updates last_backup_at on the integration record
+    """
+    from app.models.google_drive_integration import GoogleDriveIntegration
+    from app.models.transaction import Transaction
+    from app.services.google_drive_service import GoogleDriveService
+    from app.services.receipt_service import ReceiptService
+
+    phone = "+2348055557003"
+    norm_phone = normalize_phone(phone)
+
+    async with async_session_factory() as session:
+        biz = Business(name="Express Logistics", phone_number=norm_phone)
+        session.add(biz)
+        await session.flush()
+
+        user = User(business_id=biz.id, phone_number=norm_phone, role="owner")
+        session.add(user)
+        await session.flush()
+
+        # Seed confirmed transaction and receipt template
+        receipt_svc = ReceiptService()
+        await receipt_svc.set_template(
+            db=session,
+            business_id=biz.id,
+            business_display_name="Express Logistics Services",
+            contact_phone="+2348055557003",
+            address="Terminal 2, Apapa Port, Lagos",
+        )
+
+        tx = Transaction(
+            business_id=biz.id,
+            transaction_type="sale",
+            item_name="Container Clearing Fee",
+            amount=Decimal("450000"),
+            status="confirmed",
+            occurred_at=datetime.now(UTC),
+        )
+        session.add(tx)
+
+        # Connect Google Drive
+        drive_svc = GoogleDriveService()
+        encrypted_rf = drive_svc.encrypt_token("1//test_rf_express")
+        integration = GoogleDriveIntegration(
+            business_id=biz.id,
+            user_id=user.id,
+            encrypted_refresh_token=encrypted_rf,
+            connected_email="finance@expresslogistics.ng",
+            is_active=True,
+        )
+        session.add(integration)
+        await session.commit()
+
+        # Mock Google Drive API endpoints
+        with patch.object(drive_svc, "get_valid_access_token", new_callable=AsyncMock) as mock_token, \
+             patch.object(drive_svc, "ensure_backup_folder", new_callable=AsyncMock) as mock_folder, \
+             patch.object(drive_svc, "upload_pdf", new_callable=AsyncMock) as mock_upload:
+
+            mock_token.return_value = "ya29.valid_access_token_mock"
+            mock_folder.return_value = "folder_id_waasz_123"
+            mock_upload.return_value = {"id": "file_drive_backup_789", "name": "waasz_monthly_backup.pdf"}
+
+            result = await drive_svc.export_monthly_backup_for_business(session, biz.id)
+
+            assert result["status"] == "success"
+            assert result["file_id"] == "file_drive_backup_789"
+            assert result["folder_id"] == "folder_id_waasz_123"
+
+            # Assert upload was called with valid access token and PDF bytes
+            mock_upload.assert_called_once()
+            call_kwargs = mock_upload.call_args[1]
+            assert call_kwargs["access_token"] == "ya29.valid_access_token_mock"
+            assert call_kwargs["folder_id"] == "folder_id_waasz_123"
+            assert len(call_kwargs["pdf_bytes"]) > 0
+
+            # Verify integration updated with last_backup_at
+            await session.refresh(integration)
+            assert integration.last_backup_at is not None
+
+
+@pytest.mark.asyncio
+async def test_phase4_disconnect_stops_future_uploads_and_revokes_token():
+    """
+    Assert that disconnecting correctly revokes token at Google and stops future uploads.
+    """
+    from app.models.google_drive_integration import GoogleDriveIntegration
+    from app.services.google_drive_service import GoogleDriveService
+
+    phone = "+2348055557004"
+    norm_phone = normalize_phone(phone)
+
+    async with async_session_factory() as session:
+        biz = Business(name="Disconnect Test Store", phone_number=norm_phone)
+        session.add(biz)
+        await session.flush()
+
+        user = User(business_id=biz.id, phone_number=norm_phone, role="owner")
+        session.add(user)
+        await session.flush()
+
+        drive_svc = GoogleDriveService()
+        encrypted_rf = drive_svc.encrypt_token("1//test_rf_to_disconnect")
+        integration = GoogleDriveIntegration(
+            business_id=biz.id,
+            user_id=user.id,
+            encrypted_refresh_token=encrypted_rf,
+            connected_email="owner@disconnect.com",
+            is_active=True,
+        )
+        session.add(integration)
+        await session.commit()
+
+        # Mock revocation at Google
+        mock_revoke_resp = MagicMock()
+        mock_revoke_resp.status_code = 200
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_revoke_resp
+
+            success = await drive_svc.disconnect(session, biz.id)
+            assert success is True
+
+            # Revoke URL should have been invoked
+            assert mock_post.called
+
+            # Check DB state
+            await session.refresh(integration)
+            assert integration.is_active is False
+            assert integration.encrypted_refresh_token == ""
+
+            # Subsequent backup attempt should be skipped
+            res = await drive_svc.export_monthly_backup_for_business(session, biz.id)
+            assert res["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_phase4_whatsapp_connect_and_disconnect_commands():
+    """
+    Assert WhatsApp command handling for Drive connect and disconnect.
+    """
+    from app.models.google_drive_integration import GoogleDriveIntegration
+    from app.schemas.whatsapp import ParsedWhatsAppMessage, WhatsAppSendResult
+    from app.services.google_drive_service import GoogleDriveService
+    from app.services.webhook_processor import WhatsAppWebhookProcessor
+
+    phone = "+2348055557005"
+    norm_phone = normalize_phone(phone)
+
+    async with async_session_factory() as session:
+        biz = Business(name="Command Test Biz", phone_number=norm_phone)
+        session.add(biz)
+        await session.flush()
+
+        user = User(business_id=biz.id, phone_number=norm_phone, role="owner")
+        session.add(user)
+        await session.commit()
+
+        processor = WhatsAppWebhookProcessor()
+        with patch.object(processor.whatsapp, "send_text", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = WhatsAppSendResult(success=True, message_id="wamid.connect1")
+
+            # 1. Connect drive command
+            connect_msg = ParsedWhatsAppMessage(
+                message_id="wamid.in1",
+                from_phone=phone,
+                message_type="text",
+                body="connect drive",
+                timestamp=datetime.now(UTC),
+            )
+            await processor.process_message(session, connect_msg, event=None)
+
+            assert mock_send.call_count == 1
+            reply_text = mock_send.call_args[0][1]
+            assert "Connect Google Drive" in reply_text
+            assert "drive.file" in reply_text
+            assert "https://accounts.google.com/o/oauth2/v2/auth" in reply_text
+
+            # Simulate connected state
+            drive_svc = GoogleDriveService()
+            integration = GoogleDriveIntegration(
+                business_id=biz.id,
+                user_id=user.id,
+                encrypted_refresh_token=drive_svc.encrypt_token("1//test_cmd_rf"),
+                connected_email="test@cmd.com",
+                is_active=True,
+            )
+            session.add(integration)
+            await session.commit()
+
+            # 2. Disconnect drive command
+            disconnect_msg = ParsedWhatsAppMessage(
+                message_id="wamid.in2",
+                from_phone=phone,
+                message_type="text",
+                body="disconnect drive",
+                timestamp=datetime.now(UTC),
+            )
+            mock_send.reset_mock()
+            mock_send.return_value = WhatsAppSendResult(success=True, message_id="wamid.disc1")
+
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_revoke:
+                mock_revoke.return_value = MagicMock(status_code=200)
+                await processor.process_message(session, disconnect_msg, event=None)
+
+            assert mock_send.call_count == 1
+            disc_reply = mock_send.call_args[0][1]
+            assert "disconnected" in disc_reply.lower()
+            assert "revoked" in disc_reply.lower()
 

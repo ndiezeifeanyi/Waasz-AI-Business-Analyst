@@ -305,6 +305,48 @@ class WhatsAppWebhookProcessor:
             except Exception as exc:
                 logger.error("Failed to generate/deliver receipt: %s", exc)
 
+        # Check for Google Drive connect/disconnect commands
+        last_outbound = await self._get_last_outbound(db, business.id)
+        last_outbound_body = (last_outbound.body or "").lower() if last_outbound else ""
+        if lower_text in {"connect drive", "link drive", "link google drive", "backup to drive", "connect google drive"} or (
+            lower_text == "yes" and "google drive" in last_outbound_body
+        ):
+            from app.services.google_drive_service import GoogleDriveService
+            drive_svc = GoogleDriveService()
+            auth_url = drive_svc.generate_auth_url(business_id=business.id, user_id=user.id)
+            connect_msg = (
+                "🔗 *Connect Google Drive for Automated Backups*\n\n"
+                "Tap the link below to securely authorize Waasz to back up your monthly transaction summaries to your personal Google Drive:\n\n"
+                f"{auth_url}\n\n"
+                "🔒 *Security*: We request strictly the least-privilege `drive.file` scope — Waasz can only access files it creates itself, never your personal Drive files.\n\n"
+                "You can disconnect anytime by texting *DISCONNECT DRIVE*."
+            )
+            send_res = await self.whatsapp.send_text(parsed.from_phone, connect_msg)
+            await self.ledger.record_outbound_message(db, business.id, parsed.from_phone, connect_msg, send_res, user_id=user.id)
+            inbound.status = "processed"
+            if hasattr(db, "commit"):
+                await db.commit()
+            elif hasattr(db, "flush"):
+                await db.flush()
+            return
+
+        if lower_text in {"disconnect drive", "unlink drive", "unlink google drive", "disconnect google drive", "stop drive backup"}:
+            from app.services.google_drive_service import GoogleDriveService
+            drive_svc = GoogleDriveService()
+            disconnected = await drive_svc.disconnect(db, business_id=business.id)
+            if disconnected:
+                disc_msg = "✅ Your Google Drive has been disconnected. Automatic monthly PDF backups have been stopped and stored authorization tokens revoked."
+            else:
+                disc_msg = "ℹ️ No active Google Drive connection was found for your account."
+            send_res = await self.whatsapp.send_text(parsed.from_phone, disc_msg)
+            await self.ledger.record_outbound_message(db, business.id, parsed.from_phone, disc_msg, send_res, user_id=user.id)
+            inbound.status = "processed"
+            if hasattr(db, "commit"):
+                await db.commit()
+            elif hasattr(db, "flush"):
+                await db.flush()
+            return
+
         # Check for report commands
         if "weekly report" in lower_text or "send report" in lower_text:
             from app.services.report_delivery import ReportDeliveryService
@@ -617,6 +659,18 @@ class WhatsAppWebhookProcessor:
 
     def _build_onboarding_intro_message(self, invite_verified: bool = False, referral_msg: str = "") -> str:
         header = "🎉 Welcome to Waasz! Your invite code has been verified and your account is ready.\n\n" if invite_verified else "👋 Welcome to Waasz!\n\n"
+        drive_suggestion = ""
+        if getattr(settings, "google_drive_onboarding_mode", "optional") == "optional":
+            drive_suggestion = (
+                "\n\n☁️ *Optional Google Drive Backup:*\n"
+                "Want your monthly reports automatically backed up to your own Google Drive too? Reply *YES* or *CONNECT DRIVE* anytime to set this up."
+            )
+        elif getattr(settings, "google_drive_onboarding_mode", "optional") == "mandatory":
+            drive_suggestion = (
+                "\n\n☁️ *Google Drive Backup Required:*\n"
+                "To safeguard your records, monthly reports are backed up directly to your Google Drive. Reply *CONNECT DRIVE* now to link your Google account."
+            )
+
         return (
             f"{header}"
             "I'm your AI business assistant right here on WhatsApp. You can record daily sales & expenses, track inventory & low-stock alerts, generate instant PDF receipts, manage customer debts, and receive weekly & monthly business summaries.\n\n"
@@ -625,7 +679,8 @@ class WhatsAppWebhookProcessor:
             "• *Why:* Strictly to maintain your business ledger and generate your performance reports.\n"
             "• *Access & Security:* Your records are strictly isolated to your business using database row-level security and tenant boundaries. No other business can see your numbers.\n"
             "• *Data Rights:* You have complete control. You can ask me to *'delete my data'* or *'forget me'* at any time to permanently erase your records from our systems.\n\n"
-            "📌 *Note on AI Advice:* Any business insights, pricing simulations, or forecasts I provide are AI-generated estimates to guide your decision-making, not professional financial, tax, or legal advice. Final business choices always remain yours.\n\n"
+            "📌 *Note on AI Advice:* Any business insights, pricing simulations, or forecasts I provide are AI-generated estimates to guide your decision-making, not professional financial, tax, or legal advice. Final business choices always remain yours."
+            f"{drive_suggestion}\n\n"
             "How can I help your business today?"
             f"{referral_msg}"
         )
