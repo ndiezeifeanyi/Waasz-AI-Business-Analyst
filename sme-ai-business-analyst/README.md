@@ -8,6 +8,8 @@ A production-grade, multi-tenant AI assistant operating over WhatsApp Cloud API,
 - **Personal Productivity**: Daily reflections, habit goals, family reminders, and private knowledge notes.
 
 > **Defense-in-Depth Security**: Tenant isolation is strictly enforced via parameterized SQL queries and verified in CI with negative isolation test suites. All data is scoped by `user_id` and, where enabled, `business_id` with `'private'` vs `'business_shared'` visibility controls.
+>
+> *Note on Regulatory & Legal Review*: While this platform implements essential data protection practices (user consent, right-to-erasure, tenant isolation, and transparency), a formal legal review is strongly recommended prior to wider commercial launch to address potential NDPC Data-Controller-of-Major-Importance registration as user volume scales, as well as cross-border data transfer safeguards given reliance on US-based AI infrastructure.
 
 ## Key Capabilities
 

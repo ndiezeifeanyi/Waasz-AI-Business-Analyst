@@ -13,6 +13,7 @@ from app.core.database import async_session_factory
 from app.models.activity import Activity
 from app.models.goal import UserGoal
 from app.models.user import User
+from app.services.analytics_service import AI_ADVISORY_DISCLAIMER
 from app.services.ledger_service import LedgerService
 from app.services.visual_reports import VisualReportService
 from app.services.whatsapp_client import WhatsAppClient
@@ -87,8 +88,28 @@ class UnifiedReportService:
         )
         goals = (await db.execute(stmt_goals)).scalars().all()
 
+        # Fetch Phase 4 business intelligence evidence (margins, 80/20, dead stock)
+        bi_evidence = ""
+        if user.business_id:
+            try:
+                from app.services.analytics_service import AnalyticsService
+                analytics_svc = AnalyticsService()
+                period_str = "this_month" if cadence in {"monthly", "quarterly", "yearly"} else "this_week"
+                margin_res = await analytics_svc.get_margin_report(db, user.business_id, period=period_str)
+                perf_res = await analytics_svc.get_product_performance_analysis(db, user.business_id, period=period_str)
+                parts = []
+                if margin_res.get("summary_text"):
+                    parts.append(margin_res["summary_text"])
+                if perf_res.get("summary_text"):
+                    parts.append(perf_res["summary_text"])
+                bi_evidence = "\n\n".join(parts)
+            except Exception:
+                pass
+
         # Build prompt
-        report_text = await self._synthesize_report(user, cadence, curr_acts, prior_acts, goals)
+        report_text = await self._synthesize_report(
+            user, cadence, curr_acts, prior_acts, goals, bi_evidence=bi_evidence
+        )
 
         # 4. Check 24-hour customer care window
         last_inbound = user.last_inbound_at or (now - timedelta(hours=48))
@@ -188,6 +209,7 @@ class UnifiedReportService:
         curr_acts: list[Activity],
         prior_acts: list[Activity],
         goals: list[UserGoal],
+        bi_evidence: str = "",
     ) -> str:
         niche = user.niche or "personal"
         cadence_title = cadence.capitalize()
@@ -205,6 +227,15 @@ class UnifiedReportService:
         else:
             goal_summary = "No active goals set."
 
+        bi_block = ""
+        playbook_instruction = ""
+        if bi_evidence:
+            bi_block = f"\nREAL BUSINESS METRICS & INVENTORY DATA (GROUNDING SOURCE):\n{bi_evidence}\n"
+            if cadence in {"monthly", "quarterly", "yearly"} or user.niche == "sme_owner":
+                playbook_instruction = (
+                    "5. 🚀 *Personalized Growth Playbook* (Actionable business growth suggestions)\n"
+                )
+
         prompt = f"""
 You are an executive AI assistant preparing a {cadence_title} Report for a user whose profile is '{niche}'.
 
@@ -216,18 +247,21 @@ PRIOR PERIOD ACTIVITY COUNT:
 
 ACTIVE GOALS & TARGETS:
 {goal_summary}
-
+{bi_block}
 CRITICAL GROUNDING RULES:
 - Only reference activities, numbers, milestones, and metrics that appear in the logged records above.
 - If zero activities were logged for this period, state clearly that no activities were recorded, and provide helpful advice without inventing fabricated achievements or metrics.
 - Never hallucinate transactions, dates, or numbers not present in the data above.
+- GROWTH PLAYBOOK GROUNDING DISCIPLINE: Every single suggestion in the Personalized Growth Playbook section MUST explicitly cite the specific real metric from the data above that motivated it (e.g. 'Since Rice makes up 60% of your sales at a 28.9% margin, consider...', or 'Your ₦144,000 tied up in unsold Fertilizer could be freed up by bundling...').
+- If a Personalized Growth Playbook is included, conclude that section with this exact note: '{AI_ADVISORY_DISCLAIMER}'.
+- ABSOLUTELY FORBIDDEN: Generic startup-advice filler, MBA platitudes, or recommendations without citing the real underlying number.
 
 Generate a structured, inspiring report formatted cleanly for WhatsApp:
 1. 📊 *{cadence_title} Highlights* (What was achieved)
 2. 📈 *Comparison vs Prior Period* (Growth, velocity, or changes)
 3. 💡 *Concrete Suggestions* (Specific to their '{niche}' role)
 4. 🗺️ *Goal Roadmap & Next Steps* (Action items for the upcoming period)
-
+{playbook_instruction}
 WHATSAPP FORMATTING RULES:
 - Use single *asterisks* for section titles only. Do NOT bold random nouns or words.
 - NEVER use markdown headers (#, ##, ###) or nested formatting.
@@ -236,6 +270,11 @@ WHATSAPP FORMATTING RULES:
 
 Keep tone motivating, professional, and clear.
 """
+        def _attach_disclaimer_if_playbook(text: str) -> str:
+            if "Growth Playbook" in text and AI_ADVISORY_DISCLAIMER not in text:
+                return f"{text}\n\n{AI_ADVISORY_DISCLAIMER}"
+            return text
+
         # Query Provider Chain: Gemini -> Groq -> OpenAI with live model resolution and self-healing
         from app.core.model_resolver import is_model_not_found_error, model_resolver
 
@@ -249,7 +288,7 @@ Keep tone motivating, professional, and clear.
                     max_retries=1,
                 )
                 res = await llm.ainvoke([HumanMessage(content=prompt)])
-                return str(res.content).strip()
+                return _attach_disclaimer_if_playbook(str(res.content).strip())
             except Exception as exc:
                 if is_model_not_found_error(exc):
                     did_heal, new_model = await model_resolver.handle_mid_run_failure("gemini", "chat", exc)
@@ -262,7 +301,7 @@ Keep tone motivating, professional, and clear.
                                 max_retries=1,
                             )
                             res = await llm.ainvoke([HumanMessage(content=prompt)])
-                            return str(res.content).strip()
+                            return _attach_disclaimer_if_playbook(str(res.content).strip())
                         except Exception as retry_exc:
                             exc = retry_exc
                 logger.warning("Gemini report generation failed: %s. Trying Groq fallback.", exc)
@@ -279,7 +318,7 @@ Keep tone motivating, professional, and clear.
                     max_retries=1,
                 )
                 res = await groq_llm.ainvoke([HumanMessage(content=prompt)])
-                return str(res.content).strip()
+                return _attach_disclaimer_if_playbook(str(res.content).strip())
             except Exception as exc:
                 if is_model_not_found_error(exc):
                     did_heal, new_model = await model_resolver.handle_mid_run_failure("groq", "chat", exc)
@@ -292,7 +331,7 @@ Keep tone motivating, professional, and clear.
                                 max_retries=1,
                             )
                             res = await groq_llm.ainvoke([HumanMessage(content=prompt)])
-                            return str(res.content).strip()
+                            return _attach_disclaimer_if_playbook(str(res.content).strip())
                         except Exception as retry_exc:
                             exc = retry_exc
                 logger.warning("Groq report generation failed: %s. Trying OpenAI fallback.", exc)
@@ -309,7 +348,7 @@ Keep tone motivating, professional, and clear.
                     max_retries=1,
                 )
                 res = await openai_llm.ainvoke([HumanMessage(content=prompt)])
-                return str(res.content).strip()
+                return _attach_disclaimer_if_playbook(str(res.content).strip())
             except Exception as exc:
                 if is_model_not_found_error(exc):
                     did_heal, new_model = await model_resolver.handle_mid_run_failure("openai", "chat", exc)
@@ -322,7 +361,7 @@ Keep tone motivating, professional, and clear.
                                 max_retries=1,
                             )
                             res = await openai_llm.ainvoke([HumanMessage(content=prompt)])
-                            return str(res.content).strip()
+                            return _attach_disclaimer_if_playbook(str(res.content).strip())
                         except Exception as retry_exc:
                             exc = retry_exc
                 logger.warning("OpenAI report generation failed: %s.", exc)

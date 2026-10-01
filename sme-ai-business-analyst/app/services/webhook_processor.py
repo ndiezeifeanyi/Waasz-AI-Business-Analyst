@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.database import async_session_factory
 from app.core.exceptions import AppError, VoiceTranscriptionError
 from app.core.sanitization import SanitizationError, validate_extraction_input
+from app.models.transaction import Transaction
 from app.models.user import User
 from app.schemas.extraction import ExtractedRecord
 from app.schemas.whatsapp import ParsedWhatsAppMessage
@@ -157,7 +158,7 @@ class WhatsAppWebhookProcessor:
                 await self.whatsapp.send_text(parsed.from_phone, decision.reply_text)
             return
 
-        if not existing_user and decision.welcome_message:
+        if not existing_user:
             business, user = await self.ledger.get_or_create_business_and_user(db, parsed.from_phone)
             inbound = await self.ledger.record_inbound_message(db, parsed, business, user, event)
             inbound.status = "processed"
@@ -167,7 +168,8 @@ class WhatsAppWebhookProcessor:
                 ref = await self.invites.generate_user_referral_code(db, user.id, max_uses=5)
                 ref_msg = f"\n\n🎁 Your personal referral code: *{ref.code}* (share with up to 5 friends)."
 
-            full_welcome = f"{decision.welcome_message}{ref_msg}"
+            is_invite = bool(getattr(decision, "invite_code", None) or (decision.reason == "invite_code_claimed"))
+            full_welcome = self._build_onboarding_intro_message(invite_verified=is_invite, referral_msg=ref_msg)
             send_result = await self.whatsapp.send_text(parsed.from_phone, full_welcome)
             await self.ledger.record_outbound_message(
                 db, business.id, parsed.from_phone, full_welcome, send_result, user_id=user.id
@@ -215,7 +217,20 @@ class WhatsAppWebhookProcessor:
                 elif hasattr(db, "flush"):
                     await db.flush()
 
-                send_result = await self.whatsapp.send_text(parsed.from_phone, handled)
+                confirmed_tx = None
+                tx_stmt = select(Transaction).where(Transaction.confirmation_id == pending.id).limit(1)
+                tx_res = await db.execute(tx_stmt)
+                confirmed_tx = tx_res.scalar_one_or_none()
+
+                if confirmed_tx and confirmed_tx.transaction_type == "sale" and pending.status == "confirmed":
+                    send_result = await self.whatsapp.send_interactive_buttons(
+                        parsed.from_phone,
+                        handled,
+                        [(f"receipt_{confirmed_tx.id}", "📄 Send receipt")],
+                    )
+                else:
+                    send_result = await self.whatsapp.send_text(parsed.from_phone, handled)
+
                 await self.ledger.record_outbound_message(
                     db, business.id, parsed.from_phone, handled, send_result, user_id=user.id
                 )
@@ -257,8 +272,40 @@ class WhatsAppWebhookProcessor:
                 await self.ledger.record_outbound_message(db, business.id, parsed.from_phone, msg, send_result, user_id=user.id)
             return
 
+        # Check for receipt request button or keyword
+        interactive_id = parsed.interactive_reply_id or ""
+        lower_text = source_text.strip().lower()
+        if interactive_id.startswith("receipt_") or lower_text in {"send receipt", "receipt", "📄 send receipt"}:
+            target_tx_id = None
+            if interactive_id.startswith("receipt_"):
+                try:
+                    target_tx_id = UUID(interactive_id.replace("receipt_", ""))
+                except Exception:
+                    pass
+
+            from app.services.receipt_service import ReceiptService
+            receipt_svc = ReceiptService()
+            try:
+                pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
+                    db, business_id=business.id, transaction_id=target_tx_id
+                )
+                caption = f"📄 {'Invoice' if tx.is_credit else 'Receipt'} #{filename.replace('.pdf', '')}"
+                send_result = await self.whatsapp.send_document_bytes(
+                    parsed.from_phone, pdf_bytes, filename=filename, caption=caption
+                )
+                await self.ledger.record_outbound_message(
+                    db, business.id, parsed.from_phone, f"[Sent document {filename}]", send_result, user_id=user.id
+                )
+                inbound.status = "processed"
+                if hasattr(db, "commit"):
+                    await db.commit()
+                elif hasattr(db, "flush"):
+                    await db.flush()
+                return
+            except Exception as exc:
+                logger.error("Failed to generate/deliver receipt: %s", exc)
+
         # Check for report commands
-        lower_text = source_text.lower()
         if "weekly report" in lower_text or "send report" in lower_text:
             from app.services.report_delivery import ReportDeliveryService
             delivery = ReportDeliveryService(whatsapp=self.whatsapp, ledger=self.ledger)
@@ -567,6 +614,21 @@ class WhatsAppWebhookProcessor:
                 res = await res
             return res
         return None
+
+    def _build_onboarding_intro_message(self, invite_verified: bool = False, referral_msg: str = "") -> str:
+        header = "🎉 Welcome to Waasz! Your invite code has been verified and your account is ready.\n\n" if invite_verified else "👋 Welcome to Waasz!\n\n"
+        return (
+            f"{header}"
+            "I'm your AI business assistant right here on WhatsApp. You can record daily sales & expenses, track inventory & low-stock alerts, generate instant PDF receipts, manage customer debts, and receive weekly & monthly business summaries.\n\n"
+            "🔒 *Your Data & Privacy:*\n"
+            "• *What we store:* Your chat messages, business transactions, inventory, and registered phone number.\n"
+            "• *Why:* Strictly to maintain your business ledger and generate your performance reports.\n"
+            "• *Access & Security:* Your records are strictly isolated to your business using database row-level security and tenant boundaries. No other business can see your numbers.\n"
+            "• *Data Rights:* You have complete control. You can ask me to *'delete my data'* or *'forget me'* at any time to permanently erase your records from our systems.\n\n"
+            "📌 *Note on AI Advice:* Any business insights, pricing simulations, or forecasts I provide are AI-generated estimates to guide your decision-making, not professional financial, tax, or legal advice. Final business choices always remain yours.\n\n"
+            "How can I help your business today?"
+            f"{referral_msg}"
+        )
 
     async def _source_text(self, parsed: ParsedWhatsAppMessage, image_bytes: bytes | None = None) -> str:
         if parsed.message_type == "text":
