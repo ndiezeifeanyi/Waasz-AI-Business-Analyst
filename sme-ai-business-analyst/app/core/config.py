@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     require_invite_code: bool = True
     enable_user_referrals: bool = False
 
+    # Admin Dashboard Authentication & Security (Configured via .env or first-time setup wizard)
+    admin_dashboard_username: str = ""
+    admin_dashboard_password: str = ""
+    admin_dashboard_password_hash: str = ""
+    admin_session_expire_days: int = 7
+
 
     # AI Providers
     gemini_api_key: str = ""

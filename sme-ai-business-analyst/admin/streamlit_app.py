@@ -13,7 +13,12 @@ import streamlit as st
 from dotenv import load_dotenv
 
 st.set_page_config(page_title="SME AI Founder Dashboard", layout="wide")
-load_dotenv(ROOT_DIR / ".env")
+load_dotenv(ROOT_DIR / ".env", override=True)
+
+from admin.auth_manager import require_admin_auth
+
+# Security Gatekeeper: Enforce cryptographic login, weekly expiration, and lockout shield
+admin_session = require_admin_auth()
 
 
 def database_url() -> str | None:
@@ -23,7 +28,7 @@ def database_url() -> str | None:
     return url.replace("postgresql+asyncpg://", "postgresql://")
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def query_df(sql: str, params: tuple = ()) -> pd.DataFrame:
     url = database_url()
     if not url:
@@ -90,17 +95,32 @@ with st.sidebar:
     else:
         st.warning("🟡 Meta WhatsApp API: Unconfigured")
 
-    # 3. AI Engine
-    active_model = settings.gemini_model if settings.gemini_api_key else (settings.groq_model if settings.groq_api_key else "Local Heuristics")
-    st.info(f"🤖 AI Model: `{active_model}`")
+    # 3. Live AI Engine
+    try:
+        from app.core.model_resolver import model_resolver
+        active_model = model_resolver.get_active_model("gemini", "chat") or model_resolver.get_active_model("groq", "chat") or getattr(settings, "gemini_model", "gemini-3.8-flash")
+    except Exception:
+        active_model = getattr(settings, "gemini_model", "gemini-3.8-flash")
+    st.info(f"🤖 Live AI Model: `{active_model}`")
 
-    # 4. Webhook Tunnel
-    base_url = settings.app_base_url
-    if "ngrok" in base_url or "http" in base_url:
-        st.caption(f"🌐 Webhook URL: `{base_url[:35]}...`")
+    # 4. Live Webhook Endpoint (Dynamically synced with system_settings)
+    from admin.auth_manager import get_live_base_url, set_live_base_url
+    live_base = get_live_base_url()
+    live_webhook = f"{live_base}/webhooks/whatsapp"
+    st.markdown("**🌐 Active Webhook URL:**")
+    st.code(live_webhook, language="text")
+
+    with st.expander("⚡ Sync / Change Webhook URL"):
+        new_endpoint = st.text_input("Active Base Endpoint", value=live_base, key="input_live_base_url")
+        if st.button("Save & Sync Everywhere", key="btn_save_endpoint", use_container_width=True):
+            if new_endpoint.strip():
+                set_live_base_url(new_endpoint)
+                st.success(f"Synced! Active endpoint set to {new_endpoint}")
+                st.cache_data.clear()
+                st.rerun()
 
     st.write("---")
-    st.header("Filters")
+    st.header("Filters & Controls")
     if not businesses.empty:
         labels = {
             row["id"]: f"{row['name']} ({row['phone_number']})"
@@ -113,12 +133,22 @@ with st.sidebar:
         )
         if selected_business_id == "All":
             selected_business_id = None
-    if st.button("Refresh Dashboard"):
+
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("🔄 Sync Now", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+    with col_btn2:
+        auto_sync = st.checkbox("Live 10s Poll", value=False, help="Automatically poll and update live messages every 10 seconds")
+
+    if auto_sync:
+        time.sleep(10)
         st.cache_data.clear()
         st.rerun()
 
-tab_overview, tab_confirmations, tab_messages, tab_simulator, tab_broadcast, tab_export, tab_costs, tab_tasks, tab_knowledge, tab_invites, tab_recovery = st.tabs(
-    ["📊 Overview", "⏳ Confirmations", "💬 Messages", "🤖 Live Bot Console", "📢 Broadcast", "📥 Data Export", "💰 Costs", "⏰ Tasks & Reminders", "🧠 Knowledge & Embeddings", "🛡️ Users & Access", "🔑 Account Recovery"]
+tab_overview, tab_confirmations, tab_messages, tab_simulator, tab_broadcast, tab_export, tab_costs, tab_tasks, tab_knowledge, tab_invites, tab_recovery, tab_security = st.tabs(
+    ["📊 Overview", "⏳ Confirmations", "💬 Messages", "🤖 Live Bot Console", "📢 Broadcast", "📥 Data Export", "💰 Costs", "⏰ Tasks & Reminders", "🧠 Knowledge & Embeddings", "🛡️ Users & Access", "🔑 Account Recovery", "⚙️ Security & Sync"]
 )
 
 business_filter = ""
@@ -1138,5 +1168,88 @@ with tab_recovery:
                         st.error(f"Recovery failed: {str(are)}")
                     except Exception as exc:
                         st.error(f"Unexpected error: {str(exc)}")
+
+with tab_security:
+    st.subheader("⚙️ Security, Webhook Endpoints & Live Sync")
+    st.caption("Zero-downtime configuration management. All updates persist to PostgreSQL and reflect live across the application.")
+
+    sec_col1, sec_col2 = st.columns(2)
+
+    with sec_col1:
+        st.markdown("#### 🌐 Live Webhook & Domain Sync")
+        st.markdown(
+            "Update your active public domain whenever your server address changes (e.g. AWS, DuckDNS, or local tunnels). "
+            "This ensures client magic links and WhatsApp webhook documentation immediately reflect the live URL."
+        )
+
+        curr_base = get_live_base_url()
+        st.info(f"**Current Base URL:** `{curr_base}`\n\n**WhatsApp Webhook URL:** `{curr_base}/webhooks/whatsapp`")
+
+        with st.form("form_sync_webhook_url"):
+            new_url_input = st.text_input(
+                "New Public Base URL",
+                value=curr_base,
+                placeholder="https://waasz-sme-api.duckdns.org",
+                help="Enter full URL with https:// and no trailing slash",
+            )
+            submit_url_sync = st.form_submit_button("⚡ Save & Sync Live Endpoint", type="primary")
+
+            if submit_url_sync:
+                if not new_url_input.strip() or not new_url_input.strip().startswith("http"):
+                    st.error("Please enter a valid URL starting with http:// or https://")
+                else:
+                    saved_url = set_live_base_url(new_url_input)
+                    st.success(f"✅ Successfully updated live base URL to `{saved_url}`! All webhook handlers synchronized.")
+                    st.cache_data.clear()
+                    st.rerun()
+
+    with sec_col2:
+        st.markdown("#### 🔐 Change Admin Credentials")
+        st.markdown(
+            "Update your private administrator account name or master password. "
+            "Credentials are encrypted with Argon2id and stored securely in the database with zero hardcoding."
+        )
+
+        with st.form("form_change_admin_creds"):
+            update_username = st.text_input("Account Identifier / Username", value=admin_session.get("sub", ""))
+            current_pass = st.text_input("Current Master Password", type="password")
+            new_pass = st.text_input("New Master Password (min 8 chars)", type="password")
+            confirm_new_pass = st.text_input("Confirm New Master Password", type="password")
+
+            submit_creds = st.form_submit_button("🔒 Update & Encrypt Credentials")
+
+            if submit_creds:
+                if not current_pass:
+                    st.error("Please enter your current master password to authorize this change.")
+                elif not auth_manager.verify_credentials(admin_session.get("sub", ""), current_pass):
+                    st.error("Current password verification failed.")
+                elif not update_username.strip() or len(update_username.strip()) < 3:
+                    st.error("Account name must be at least 3 characters.")
+                elif not new_pass or len(new_pass) < 8:
+                    st.error("New master password must be at least 8 characters.")
+                elif new_pass != confirm_new_pass:
+                    st.error("New passwords do not match.")
+                else:
+                    try:
+                        auth_manager.save_admin_credentials(update_username.strip(), new_pass)
+                        # Re-issue active session token
+                        new_tok = auth_manager.create_session_token(update_username.strip())
+                        st.session_state["admin_session_token"] = new_tok
+                        st.query_params["_sess"] = new_tok
+                        st.success("✅ Credentials successfully updated and re-encrypted with Argon2id!")
+                        time.sleep(0.5)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error saving credentials: {e}")
+
+    st.write("---")
+    st.markdown("#### 🛡️ Active Administrative Session Status")
+    st.markdown(
+        f"- **Authenticated Identity:** `{admin_session.get('sub', 'admin')}`\n"
+        f"- **Session Policy:** 7-Day Cryptographic Rotating Window (Weekly Reset)\n"
+        f"- **Time Remaining in Session:** `{format_duration(admin_session.get('remaining_seconds', 0))}`\n"
+        f"- **Signature Algorithm:** `HMAC-SHA256 (JWT)`\n"
+        f"- **Anti-Brute-Force Rate Limiting:** Active (Max 5 attempts / 15m lockout)"
+    )
 
 
