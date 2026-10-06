@@ -286,9 +286,11 @@ async def test_live_information_service_grounding_failure_honest_degradation():
     mock_http_resp.status_code = 429
     mock_http_resp.text = "RESOURCE_EXHAUSTED"
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post, \
+         patch.object(service, "_fallback_live_search", new_callable=AsyncMock) as mock_fallback:
         mock_post.return_value = mock_http_resp
+        mock_fallback.return_value = GROUNDING_FAIL_MESSAGE
 
         result = await service.get_current_information("What are today's top stock headlines?")
         assert result == GROUNDING_FAIL_MESSAGE
-        assert "I can't access live information right now" in result
+        assert "I can't access live information" in result

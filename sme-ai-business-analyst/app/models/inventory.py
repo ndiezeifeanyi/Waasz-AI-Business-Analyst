@@ -29,6 +29,14 @@ class InventoryItem(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    @property
+    def reorder_threshold(self) -> Decimal | None:
+        return self.low_stock_threshold
+
+    @reorder_threshold.setter
+    def reorder_threshold(self, value: Decimal | None) -> None:
+        self.low_stock_threshold = value
+
 
 from app.core.database import Base
 from app.models.enums import InventoryMovementTypeEnum, TransactionStatusEnum
@@ -60,5 +68,9 @@ class InventoryMovement(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     status: Mapped[str] = mapped_column(TransactionStatusEnum, default="pending_confirmation")
+    created_by_member_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_wamid: Mapped[str | None] = mapped_column(String(160), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

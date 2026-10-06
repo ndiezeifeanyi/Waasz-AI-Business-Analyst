@@ -20,6 +20,7 @@ CREATE INDEX IF NOT EXISTS idx_google_drive_integrations_is_active ON google_dri
 
 ALTER TABLE google_drive_integrations ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "google_drive_integrations_business_isolation" ON google_drive_integrations;
 CREATE POLICY "google_drive_integrations_business_isolation" ON google_drive_integrations
     FOR ALL
     USING (business_id = NULLIF(current_setting('app.current_business_id', true), '')::uuid);

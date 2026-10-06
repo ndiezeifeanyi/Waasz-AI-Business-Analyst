@@ -512,4 +512,90 @@ async def test_agent_greeting_with_simultaneous_pending_sale_and_overdue_reminde
     assert "reschedule" not in reply_lower
 
 
+@pytest.mark.asyncio
+async def test_phase4_agent_tools_execution(mock_context):
+    """Verify that AgentService binds and executes Phase 4 BI tools."""
+    business, user, mock_db = mock_context
+
+    mock_analytics = AsyncMock()
+    mock_analytics.get_margin_report.return_value = {
+        "summary_text": "📊 Gross Margin Audit (This Month): Overall Gross Margin: 28.2%"
+    }
+    mock_analytics.get_product_performance_analysis.return_value = {
+        "summary_text": "📈 Product Performance: 1 Core Driver generates ~80% of revenue."
+    }
+    mock_analytics.simulate_pricing.return_value = {
+        "summary_text": "🏷️ Pricing Simulation: Rice (10% Discount) -> New Selling Price: ₦45,000"
+    }
+
+    agent = AgentService(analytics=mock_analytics)
+
+    # 1. get_margin_report
+    out1, prompt_req1 = await agent._execute_tool(
+        mock_db, business, user, "get_margin_report", {"period": "this_month", "item_name": "rice"}, "what is my margin on rice"
+    )
+    assert "Gross Margin Audit" in out1
+    assert prompt_req1 is False
+    assert mock_analytics.get_margin_report.await_count == 1
+
+    # 2. get_product_performance_analysis
+    out2, prompt_req2 = await agent._execute_tool(
+        mock_db, business, user, "get_product_performance_analysis", {"period": "this_month"}, "80 20 analysis"
+    )
+    assert "Product Performance" in out2
+    assert prompt_req2 is False
+    assert mock_analytics.get_product_performance_analysis.await_count == 1
+
+    # 3. simulate_pricing
+    out3, prompt_req3 = await agent._execute_tool(
+        mock_db, business, user, "simulate_pricing", {"item_name": "Rice", "discount_pct": 10.0}, "simulate 10% discount on rice"
+    )
+    assert "Pricing Simulation" in out3
+    assert prompt_req3 is False
+    assert mock_analytics.simulate_pricing.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_phase5_agent_cash_flow_tools_execution(mock_context):
+    """Verify that AgentService binds and executes Phase 5 cash flow and payable tools."""
+    business, user, mock_db = mock_context
+
+    mock_analytics = AsyncMock()
+    mock_analytics.log_upcoming_payable.return_value = (
+        MagicMock(), "✅ Logged upcoming payable: • Amount: ₦150,000 • Due Date: Oct 25, 2026"
+    )
+    mock_analytics.get_cash_flow_forecast.return_value = {
+        "summary_text": "📉 Cash Flow Forecast (Simplified v1): Healthy Cash Flow: +₦240,000"
+    }
+
+    agent = AgentService(analytics=mock_analytics)
+
+    # 1. log_upcoming_payable
+    out1, prompt_req1 = await agent._execute_tool(
+        mock_db,
+        business,
+        user,
+        "log_upcoming_payable",
+        {"amount": 150000.0, "due_date": "2026-10-25", "description": "Rice supplier", "vendor_name": "Dangote"},
+        "i owe rice supplier 150k due oct 25",
+    )
+    assert "Logged upcoming payable" in out1
+    assert prompt_req1 is False
+    assert mock_analytics.log_upcoming_payable.await_count == 1
+
+    # 2. get_cash_flow_forecast
+    out2, prompt_req2 = await agent._execute_tool(
+        mock_db,
+        business,
+        user,
+        "get_cash_flow_forecast",
+        {"trailing_days": 30, "horizon_days": 14},
+        "forecast cash flow for next 2 weeks",
+    )
+    assert "Cash Flow Forecast" in out2
+    assert prompt_req2 is False
+    assert mock_analytics.get_cash_flow_forecast.await_count == 1
+
+
+
 

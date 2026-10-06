@@ -22,10 +22,12 @@ class GoalService:
         target_date: datetime | None = None,
         business_id: UUID | None = None,
         visibility: str = "private",
+        created_by_member_id: UUID | None = None,
     ) -> UserGoal:
         goal = UserGoal(
             user_id=user_id,
             business_id=business_id,
+            created_by_member_id=created_by_member_id,
             title=title,
             category=category,
             target_value=target_value,

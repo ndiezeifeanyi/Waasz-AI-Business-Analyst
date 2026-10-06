@@ -3,96 +3,480 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Business Dashboard</title>
+    <title>{{ business_name or 'Business' }} — Financial Dashboard | Waasz AI</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
             --primary: #2563eb;
-            --success: #22c55e;
-            --danger: #ef4444;
+            --primary-light: #eff6ff;
+            --success: #16a34a;
+            --success-light: #dcfce7;
+            --danger: #dc2626;
+            --danger-light: #fee2e2;
             --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --border: #e2e8f0;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
         }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: var(--bg);
-            margin: 0;
-            padding: 20px;
-            color: #1e293b;
+            color: var(--text-main);
+            padding: 16px;
+            -webkit-font-smoothing: antialiased;
         }
+
         .container {
-            max-width: 800px;
+            max-width: 900px;
             margin: 0 auto;
         }
-        .card {
+
+        /* Header */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .brand-block {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-badge {
+            background: #2563eb;
+            color: white;
+            font-weight: 800;
+            font-size: 16px;
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.3);
+        }
+
+        .business-title {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+
+        .dashboard-subtitle {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        /* Period Pill Selector */
+        .period-selector {
+            display: flex;
+            background: #e2e8f0;
+            border-radius: 10px;
+            padding: 3px;
+            gap: 2px;
+        }
+
+        .period-btn {
+            border: none;
+            background: transparent;
+            padding: 6px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .period-btn.active {
             background: white;
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            color: var(--primary);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.06);
+        }
+
+        /* KPI Cards */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 14px;
             margin-bottom: 20px;
         }
-        h1 { font-size: 24px; margin-bottom: 8px; }
-        .subtitle { color: #64748b; margin-bottom: 24px; }
-        .chart-container { position: relative; height: 300px; width: 100%; }
+
+        .kpi-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        }
+
+        .kpi-label {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        .kpi-value {
+            font-size: 22px;
+            font-weight: 800;
+            margin-bottom: 4px;
+        }
+
+        .kpi-value.sales { color: var(--success); }
+        .kpi-value.expenses { color: var(--danger); }
+        .kpi-value.profit { color: var(--primary); }
+
+        .kpi-sub {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        /* Chart Card */
+        .chart-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+            margin-bottom: 24px;
+        }
+
+        .chart-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .chart-title {
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 340px;
+            width: 100%;
+        }
+
+        /* Breakdown Table */
+        .table-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        }
+
+        .table-title {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 14px;
+        }
+
+        .table-wrapper {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 14px;
+        }
+
+        th {
+            background: #f1f5f9;
+            color: var(--text-muted);
+            font-weight: 600;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .badge-pos {
+            display: inline-block;
+            background: var(--success-light);
+            color: var(--success);
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-weight: 700;
+            font-size: 12px;
+        }
+
+        .badge-neg {
+            display: inline-block;
+            background: var(--danger-light);
+            color: var(--danger);
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-weight: 700;
+            font-size: 12px;
+        }
+
+        .footer-note {
+            text-align: center;
+            margin-top: 24px;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="card">
-            <h1>Business Performance</h1>
-            <p class="subtitle">Weekly summary of your sales and expenses</p>
+        <!-- Header -->
+        <div class="header">
+            <div class="brand-block">
+                <div class="brand-badge">W</div>
+                <div>
+                    <h1 class="business-title">{{ business_name or 'Financial Performance' }}</h1>
+                    <div class="dashboard-subtitle">Live Interactive Business Dashboard</div>
+                </div>
+            </div>
+            <div class="period-selector">
+                <button class="period-btn" onclick="switchPeriod(7, this)">7D</button>
+                <button class="period-btn active" onclick="switchPeriod(30, this)">30D</button>
+                <button class="period-btn" onclick="switchPeriod(90, this)">90D</button>
+                <button class="period-btn" onclick="switchPeriod(365, this)">1Y</button>
+            </div>
+        </div>
+
+        <!-- KPI Metrics -->
+        <div class="kpi-grid">
+            <div class="kpi-card">
+                <div class="kpi-label">Total Revenue</div>
+                <div class="kpi-value sales" id="kpiSales">₦0</div>
+                <div class="kpi-sub">Total sales recorded</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-label">Total Expenses</div>
+                <div class="kpi-value expenses" id="kpiExpenses">₦0</div>
+                <div class="kpi-sub">Total business costs</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-label">Net Profit</div>
+                <div class="kpi-value profit" id="kpiProfit">₦0</div>
+                <div class="kpi-sub" id="kpiMargin">0% margin</div>
+            </div>
+        </div>
+
+        <!-- Chart -->
+        <div class="chart-card">
+            <div class="chart-header">
+                <div class="chart-title">Revenue & Expenses Trend</div>
+                <span id="chartRangeLabel" style="font-size: 13px; color: var(--text-muted);">Last 30 Days</span>
+            </div>
             <div class="chart-container">
                 <canvas id="performanceChart"></canvas>
             </div>
         </div>
+
+        <!-- Summary Table -->
+        <div class="table-card">
+            <div class="table-title">Recent Activity Breakdown</div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Sales</th>
+                            <th>Expenses</th>
+                            <th>Net Profit</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody">
+                        <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Loading financial data...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="footer-note">
+            Powered by Waasz AI — Your WhatsApp Business Analyst
+        </div>
     </div>
 
     <script>
-        async function loadData() {
-            const token = "{{ token }}";
-            const response = await fetch(`/reports/data/${token}`);
-            const result = await response.json();
+        const token = "{{ token }}";
+        let chartInstance = null;
+        let currentDays = 30;
+
+        function formatNaira(num) {
+            return "₦" + Number(num || 0).toLocaleString("en-NG", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+        }
+
+        async function loadDashboardData(days = 30) {
+            currentDays = days;
+            try {
+                const response = await fetch(`/reports/data/${token}?days=${days}`);
+                if (!response.ok) {
+                    window.location.reload();
+                    return;
+                }
+                const res = await response.json();
+                renderDashboard(res);
+            } catch (err) {
+                console.error("Failed to load dashboard data:", err);
+            }
+        }
+
+        function renderDashboard(payload) {
+            const summary = payload.summary || {};
+            const data = payload.data || [];
+
+            // Update KPIs
+            document.getElementById("kpiSales").innerText = formatNaira(summary.total_sales);
+            document.getElementById("kpiExpenses").innerText = formatNaira(summary.total_expenses);
             
-            const labels = result.data.map(d => d.date);
-            const sales = result.data.map(d => d.sales);
-            const expenses = result.data.map(d => d.expenses);
+            const netProfit = summary.net_profit || 0;
+            const profitEl = document.getElementById("kpiProfit");
+            profitEl.innerText = formatNaira(netProfit);
+            if (netProfit >= 0) {
+                profitEl.style.color = "var(--primary)";
+            } else {
+                profitEl.style.color = "var(--danger)";
+            }
+
+            document.getElementById("kpiMargin").innerText = (summary.margin_pct || 0) + "% gross margin";
+            document.getElementById("chartRangeLabel").innerText = `Last ${currentDays} Days`;
+
+            // Render Chart
+            const labels = data.map(d => d.date);
+            const sales = data.map(d => d.sales);
+            const expenses = data.map(d => d.expenses);
 
             const ctx = document.getElementById('performanceChart').getContext('2d');
-            new Chart(ctx, {
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+
+            chartInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: labels,
                     datasets: [
                         {
-                            label: 'Sales',
+                            label: 'Sales (₦)',
                             data: sales,
-                            borderColor: '#22c55e',
-                            backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                            borderColor: '#16a34a',
+                            backgroundColor: 'rgba(22, 163, 74, 0.08)',
+                            borderWidth: 2.5,
                             fill: true,
-                            tension: 0.4
+                            tension: 0.35,
+                            pointRadius: data.length <= 14 ? 4 : 0,
+                            pointHoverRadius: 6
                         },
                         {
-                            label: 'Expenses',
+                            label: 'Expenses (₦)',
                             data: expenses,
-                            borderColor: '#ef4444',
-                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                            borderColor: '#dc2626',
+                            backgroundColor: 'rgba(220, 38, 38, 0.08)',
+                            borderWidth: 2.5,
                             fill: true,
-                            tension: 0.4
+                            tension: 0.35,
+                            pointRadius: data.length <= 14 ? 4 : 0,
+                            pointHoverRadius: 6
                         }
                     ]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
                     plugins: {
-                        legend: { position: 'bottom' }
+                        legend: {
+                            position: 'top',
+                            labels: { font: { weight: '600', size: 12 } }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': ' + formatNaira(context.parsed.y);
+                                }
+                            }
+                        }
                     },
                     scales: {
-                        y: { beginAtZero: true }
+                        x: {
+                            grid: { display: false },
+                            ticks: {
+                                maxTicksLimit: 8,
+                                font: { size: 11 }
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                callback: function(value) {
+                                    if (value >= 1000000) return '₦' + (value/1000000).toFixed(1) + 'M';
+                                    if (value >= 1000) return '₦' + (value/1000).toFixed(0) + 'k';
+                                    return '₦' + value;
+                                },
+                                font: { size: 11 }
+                            }
+                        }
                     }
                 }
             });
+
+            // Render Table (most recent dates first, up to 10 rows with activity)
+            const activeRows = data.filter(d => d.sales > 0 || d.expenses > 0).reverse().slice(0, 10);
+            const tbody = document.getElementById("tableBody");
+            if (activeRows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 20px;">No transactions recorded in this period.</td></tr>';
+            } else {
+                tbody.innerHTML = activeRows.map(row => {
+                    const profit = row.profit || (row.sales - row.expenses);
+                    const badgeClass = profit >= 0 ? 'badge-pos' : 'badge-neg';
+                    return `
+                        <tr>
+                            <td style="font-weight: 600;">${row.date}</td>
+                            <td style="color: var(--success); font-weight: 600;">${formatNaira(row.sales)}</td>
+                            <td style="color: var(--danger); font-weight: 600;">${formatNaira(row.expenses)}</td>
+                            <td><span class="${badgeClass}">${formatNaira(profit)}</span></td>
+                        </tr>
+                    `;
+                }).join("");
+            }
         }
-        loadData();
+
+        function switchPeriod(days, btn) {
+            document.querySelectorAll(".period-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            loadDashboardData(days);
+        }
+
+        // Initial load
+        loadDashboardData(30);
     </script>
 </body>
 </html>

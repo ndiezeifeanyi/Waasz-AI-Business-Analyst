@@ -17,6 +17,9 @@ class Task(Base):
     user_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    created_by_member_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(500))
     description: Mapped[str | None] = mapped_column(String(2000))
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -26,8 +29,8 @@ class Task(Base):
         DateTime(timezone=True), default=datetime.utcnow
     )
     is_alarm_mode: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    repeat_interval_seconds: Mapped[int] = mapped_column(Integer, default=60, server_default="60")
-    max_repeats: Mapped[int] = mapped_column(Integer, default=10, server_default="10")
+    repeat_interval_seconds: Mapped[int] = mapped_column(Integer, default=300, server_default="300")
+    max_repeats: Mapped[int] = mapped_column(Integer, default=6, server_default="6")
     repeat_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_repeat_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -157,7 +157,29 @@ class ReportScheduler:
             logger.exception("Monthly Google Drive backup job failed at %s: %s", now_utc.isoformat(), exc)
             return {"status": "error", "error": str(exc)}
 
+    async def run_daily_inactivity_nudges(self) -> int:
+        """Daily job (6pm local time): send gentle nudge to users with no activity today."""
+        now_utc = datetime.now(UTC)
+        self.last_run_times["dispatch_daily_inactivity_nudges"] = now_utc.isoformat()
+        logger.info("Running daily 6pm inactivity nudge check...")
+        try:
+            from app.services.nudge_service import InactivityNudgeService
+            nudge_svc = InactivityNudgeService()
+            async with async_session_factory() as db:
+                sent = await nudge_svc.dispatch_daily_inactivity_nudges(db, now_override=now_utc)
+                logger.info("Dispatched %d 6pm inactivity nudges", sent)
+                return sent
+        except Exception as exc:
+            logger.exception("Daily inactivity nudge job failed: %s", exc)
+            return 0
+
     def start(self) -> None:
+        self.scheduler.add_job(
+            self.run_daily_inactivity_nudges,
+            CronTrigger(hour=18, minute=0, timezone=settings.local_timezone),
+            id="dispatch_daily_inactivity_nudges",
+            replace_existing=True,
+        )
         self.scheduler.add_job(
             self.run_daily_unified_reports,
             CronTrigger(hour=settings.daily_report_hour_local),

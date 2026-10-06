@@ -1,17 +1,19 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 import io
+import os
+import base64
+import logging
 from uuid import UUID
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-import reportlab.rl_config as rl_config
+from reportlab.platypus import HRFlowable, Image as RLImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-rl_config.pageCompression = 0
+logger = logging.getLogger(__name__)
 
 from app.models.business import Business
 from app.models.customer import Customer
@@ -32,6 +34,7 @@ class ReceiptService:
         db: AsyncSession,
         business_id: UUID,
         transaction_id: UUID | None = None,
+        member_id: UUID | None = None,
     ) -> tuple[bytes, str, Transaction]:
         """
         Builds the PDF document for a confirmed sale transaction.
@@ -43,6 +46,19 @@ class ReceiptService:
             tx_stmt = select(Transaction).where(
                 Transaction.id == transaction_id,
                 Transaction.business_id == business_id,
+            )
+        elif member_id:
+            # Pick latest confirmed sale recorded by this specific member
+            tx_stmt = (
+                select(Transaction)
+                .where(
+                    Transaction.business_id == business_id,
+                    Transaction.created_by_member_id == member_id,
+                    Transaction.transaction_type == "sale",
+                    Transaction.status == "confirmed",
+                )
+                .order_by(Transaction.occurred_at.desc())
+                .limit(1)
             )
         else:
             # Pick latest confirmed sale
@@ -66,7 +82,8 @@ class ReceiptService:
         from app.models.receipt_template import ReceiptTemplate
         tmpl_stmt = select(ReceiptTemplate).where(ReceiptTemplate.business_id == business_id)
         tmpl_res = await db.execute(tmpl_stmt)
-        template = tmpl_res.scalar_one_or_none()
+        raw_tmpl = tmpl_res.scalar_one_or_none()
+        template = raw_tmpl if isinstance(raw_tmpl, ReceiptTemplate) else None
 
         biz = await db.get(Business, business_id)
         biz_name = (template.business_display_name if template and template.business_display_name else None) or (biz.name if biz else "Business")
@@ -96,7 +113,18 @@ class ReceiptService:
             debt_res = await db.execute(debt_stmt)
             debt = debt_res.scalar_one_or_none()
 
-        # 5. Build PDF in memory
+        # 5. Fetch staff member who served the customer (if recorded by a member)
+        staff_member = None
+        if transaction.created_by_member_id:
+            from app.models.member import Member
+            staff_stmt = select(Member).where(
+                Member.id == transaction.created_by_member_id,
+                Member.business_id == business_id,
+            )
+            staff_res = await db.execute(staff_stmt)
+            staff_member = staff_res.scalar_one_or_none()
+
+        # 6. Build PDF in memory
         is_credit = bool(transaction.is_credit)
         doc_type = "INVOICE" if is_credit else "RECEIPT"
         short_id = str(transaction.id).replace("-", "")[:8].upper()
@@ -222,7 +250,22 @@ class ReceiptService:
             else:
                 due_date_str = "Due upon receipt"
 
-        biz_info_col = [Paragraph(biz_name, biz_name_style)]
+        biz_info_col = []
+        if template and template.business_logo:
+            try:
+                logo_val = str(template.business_logo).strip()
+                if os.path.exists(logo_val):
+                    biz_info_col.append(RLImage(logo_val, width=50, height=50))
+                    biz_info_col.append(Spacer(1, 4))
+                elif logo_val.startswith("data:image") and "base64," in logo_val:
+                    b64_data = logo_val.split("base64,")[1]
+                    img_bytes = base64.b64decode(b64_data)
+                    biz_info_col.append(RLImage(io.BytesIO(img_bytes), width=50, height=50))
+                    biz_info_col.append(Spacer(1, 4))
+            except Exception as logo_err:
+                logger.warning("Could not render logo in receipt PDF: %s", logo_err)
+
+        biz_info_col.append(Paragraph(biz_name, biz_name_style))
         if biz_address:
             biz_info_col.append(Paragraph(biz_address, biz_sub_style))
         contact_line = []
@@ -238,6 +281,8 @@ class ReceiptService:
             Paragraph(f"<b>{doc_type} #:</b> {doc_number}", meta_val_style),
             Paragraph(f"<b>Date:</b> {date_str}", meta_val_style),
         ]
+        if staff_member:
+            doc_info_col.append(Paragraph(f"<b>Served By:</b> {staff_member.display_name}", meta_val_style))
         if is_credit and due_date_str:
             doc_info_col.append(Paragraph(f"<b>Payment Due:</b> {due_date_str}", meta_val_style))
 
@@ -276,25 +321,27 @@ class ReceiptService:
         cust_name = customer.name if customer else (transaction.description if is_credit else None)
         cust_phone = customer.phone_number if customer else None
 
-        if cust_name:
-            bill_to_data = [
-                [Paragraph("BILLED TO / CUSTOMER", section_heading)],
-                [Paragraph(f"<b>Name:</b> {cust_name}", body_text)],
-            ]
-            if cust_phone:
-                bill_to_data.append([Paragraph(f"<b>Phone:</b> {cust_phone}", body_text)])
-            bill_to_table = Table(bill_to_data, colWidths=[540])
-            bill_to_table.setStyle(
-                TableStyle([
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("TOPPADDING", (0, 0), (-1, -1), 1),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ])
-            )
-            elements.append(bill_to_table)
-            elements.append(Spacer(1, 14))
+        if not cust_name:
+            cust_name = "Walk-in Customer"
+
+        bill_to_data = [
+            [Paragraph("BILLED TO / CUSTOMER", section_heading)],
+            [Paragraph(f"<b>Name:</b> {cust_name}", body_text)],
+        ]
+        if cust_phone:
+            bill_to_data.append([Paragraph(f"<b>Phone:</b> {cust_phone}", body_text)])
+        bill_to_table = Table(bill_to_data, colWidths=[540])
+        bill_to_table.setStyle(
+            TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 1),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ])
+        )
+        elements.append(bill_to_table)
+        elements.append(Spacer(1, 14))
 
         # --- Status Badge Box ---
         if is_credit:
@@ -455,9 +502,15 @@ class ReceiptService:
             elements.append(Spacer(1, 4))
         elements.append(Paragraph("Thank you for your business!", footer_style))
         elements.append(Spacer(1, 4))
-        elements.append(
-            Paragraph("Generated electronically by Waasz Business Assistant", footer_style)
+
+        from app.core.config import settings
+        waasz_phone = getattr(settings, "waasz_phone_number", "+234 904 476 5496")
+        waasz_url = getattr(settings, "waasz_whatsapp_url", "https://wa.me/2349044765496")
+        footer_link = (
+            f'Generated electronically by Waasz AI Business Assistant • '
+            f'<link href="{waasz_url}" color="#1d4ed8"><u>Chat on WhatsApp: {waasz_phone}</u></link>'
         )
+        elements.append(Paragraph(footer_link, footer_style))
 
         doc.build(elements)
         pdf_bytes = buffer.getvalue()
@@ -475,8 +528,8 @@ class ReceiptService:
         self,
         db: AsyncSession,
         business_id: UUID,
-        business_display_name: str,
-        contact_phone: str,
+        business_display_name: str | None = None,
+        contact_phone: str | None = None,
         address: str | None = None,
         business_logo: str | None = None,
         contact_email: str | None = None,
@@ -485,11 +538,15 @@ class ReceiptService:
     ):
         from app.models.receipt_template import ReceiptTemplate
         tmpl = await self.get_template(db, business_id)
+        biz = await db.get(Business, business_id)
+        eff_biz_name = business_display_name or (biz.name if biz else "Business")
+        eff_phone = contact_phone or (biz.phone_number if biz else "")
+
         if not tmpl:
             tmpl = ReceiptTemplate(
                 business_id=business_id,
-                business_display_name=business_display_name,
-                contact_phone=contact_phone,
+                business_display_name=eff_biz_name,
+                contact_phone=eff_phone,
                 address=address,
                 business_logo=business_logo,
                 contact_email=contact_email,
@@ -498,8 +555,10 @@ class ReceiptService:
             )
             db.add(tmpl)
         else:
-            tmpl.business_display_name = business_display_name
-            tmpl.contact_phone = contact_phone
+            if business_display_name is not None:
+                tmpl.business_display_name = business_display_name
+            if contact_phone is not None:
+                tmpl.contact_phone = contact_phone
             if address is not None:
                 tmpl.address = address
             if business_logo is not None:
@@ -510,6 +569,12 @@ class ReceiptService:
                 tmpl.payment_terms_note = payment_terms_note
             if footer_note is not None:
                 tmpl.footer_note = footer_note
+
+        effective_name = business_display_name or (tmpl.business_display_name if tmpl else None)
+        if effective_name and biz:
+            biz.name = effective_name
+            biz.is_provisional = False
+
         await db.commit()
         await db.refresh(tmpl)
         return tmpl
@@ -522,10 +587,15 @@ class ReceiptService:
     ):
         tmpl = await self.get_template(db, business_id)
         if not tmpl:
-            return None
+            return await self.set_template(db, business_id, **kwargs)
         for key, val in kwargs.items():
             if val is not None and hasattr(tmpl, key):
                 setattr(tmpl, key, val)
+        if kwargs.get("business_display_name"):
+            biz = await db.get(Business, business_id)
+            if biz:
+                biz.name = kwargs["business_display_name"]
+                biz.is_provisional = False
         await db.commit()
         await db.refresh(tmpl)
         return tmpl

@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str = ""
     whatsapp_api_version: str = "v20.0"
     enable_group_messaging: bool = False  # Disabled by default; requires Meta OBA verification
+    waasz_phone_number: str = "+234 904 476 5496"
+    waasz_whatsapp_url: str = "https://wa.me/2349044765496"
 
     # Access Control & Strategy
     access_mode: str = "allowlist"  # "allowlist" | "invite_code" | "open"
@@ -69,6 +71,12 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_oauth_redirect_uri: str = "http://localhost:8000/api/v1/integrations/google-drive/callback"
+
+    # Image Generation Flag (cost control)
+    enable_image_generation: bool = False
+
+    # Alarm Escalation Mode Default
+    default_reminders_to_alarm_mode: bool = True
 
     # Cost Limits
     daily_ai_spend_limit_usd: float = Field(default=5.0, ge=0)
@@ -98,7 +106,8 @@ class Settings(BaseSettings):
         """Ensure debug is False in production."""
         if isinstance(v, str):
             v = v.lower() in ("true", "1", "yes")
-        if v and "app_env" in cls.__fields__:
+        fields = getattr(cls, "model_fields", getattr(cls, "__fields__", {}))
+        if v and "app_env" in fields:
             logger.warning("Debug mode enabled - ensure this is not production!")
         return v
 
@@ -116,6 +125,17 @@ class Settings(BaseSettings):
         """Ensure gemini_image_api_key falls back to gemini_api_key if unset."""
         if not self.gemini_image_api_key:
             self.gemini_image_api_key = self.gemini_api_key
+        return self
+
+    @model_validator(mode="after")
+    def resolve_google_oauth_redirect_uri(self):
+        """Derive redirect URI from app_base_url if left at local default and base URL is set."""
+        if (
+            self.google_oauth_redirect_uri == "http://localhost:8000/api/v1/integrations/google-drive/callback"
+            and self.app_base_url
+            and not self.app_base_url.startswith("http://localhost")
+        ):
+            self.google_oauth_redirect_uri = f"{self.app_base_url.rstrip('/')}/api/v1/integrations/google-drive/callback"
         return self
 
     @property

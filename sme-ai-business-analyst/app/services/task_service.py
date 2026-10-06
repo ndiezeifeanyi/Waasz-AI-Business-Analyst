@@ -17,13 +17,15 @@ class TaskService:
         description: str | None = None,
         due_at: datetime | None = None,
         user_id: UUID | None = None,
+        created_by_member_id: UUID | None = None,
         is_alarm_mode: bool = False,
-        repeat_interval_seconds: int = 60,
-        max_repeats: int = 10,
+        repeat_interval_seconds: int = 300,
+        max_repeats: int = 6,
     ) -> Task:
         task = Task(
             business_id=business_id,
             user_id=user_id,
+            created_by_member_id=created_by_member_id,
             title=title,
             description=description,
             due_at=due_at,

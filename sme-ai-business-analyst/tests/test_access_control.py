@@ -24,6 +24,15 @@ async def cleanup_access_control_test_records():
     orig_mode = settings.access_mode
     orig_cap = settings.max_active_users
     orig_req = settings.require_invite_code
+    ac = AccessControlService()
+    orig_db_mode = None
+    orig_db_cap = None
+    try:
+        async with async_session_factory() as session:
+            orig_db_mode = await ac.get_access_mode(session)
+            orig_db_cap = await ac.get_max_active_users(session)
+    except Exception:
+        pass
 
     yield
 
@@ -32,6 +41,13 @@ async def cleanup_access_control_test_records():
     settings.require_invite_code = orig_req
 
     async with async_session_factory() as session:
+        try:
+            if orig_db_mode is not None:
+                await ac.set_access_mode(session, orig_db_mode)
+            if orig_db_cap is not None:
+                await ac.set_max_active_users(session, orig_db_cap)
+        except Exception:
+            pass
         test_phones = (
             [normalize_phone(f"+23480000002{i}") for i in range(0, 10)]
             + [f"+23480000002{i}" for i in range(0, 10)]
@@ -56,6 +72,9 @@ async def test_allowlist_mode_unapproved_number_rejected_creates_zero_db_records
     """
     settings.access_mode = "allowlist"
     settings.max_active_users = 20
+    async with async_session_factory() as session:
+        await AccessControlService().set_access_mode(session, "allowlist")
+        await AccessControlService().set_max_active_users(session, 20)
 
     phone = "+234800000021"
     norm_phone = normalize_phone(phone)
@@ -110,6 +129,9 @@ async def test_allowlist_mode_approved_number_admitted_normally():
     """
     settings.access_mode = "allowlist"
     settings.max_active_users = 20
+    async with async_session_factory() as session:
+        await AccessControlService().set_access_mode(session, "allowlist")
+        await AccessControlService().set_max_active_users(session, 20)
 
     phone = "+234800000022"
     norm_phone = normalize_phone(phone)
@@ -173,6 +195,9 @@ async def test_allowlist_mode_max_active_users_cap_rejects_even_approved_number(
 
     # Set hard cap equal to current users, so system is at capacity
     settings.max_active_users = current_users
+    async with async_session_factory() as session:
+        await AccessControlService().set_access_mode(session, "allowlist")
+        await AccessControlService().set_max_active_users(session, current_users)
 
     captured_outbound: list[str] = []
     mock_whatsapp = AsyncMock()
@@ -214,6 +239,8 @@ async def test_open_mode_admits_any_number_immediately_with_no_gate_check():
     No gate check at all — every new number gets an account immediately.
     """
     settings.access_mode = "open"
+    async with async_session_factory() as session:
+        await AccessControlService().set_access_mode(session, "open")
 
     phone = "+234800000024"
     norm_phone = normalize_phone(phone)
@@ -252,6 +279,8 @@ async def test_switching_access_mode_to_invite_code_requires_code():
     Confirm switching ACCESS_MODE to 'invite_code' enforces invite codes.
     """
     settings.access_mode = "invite_code"
+    async with async_session_factory() as session:
+        await AccessControlService().set_access_mode(session, "invite_code")
 
     phone = "+234800000025"
     norm_phone = normalize_phone(phone)

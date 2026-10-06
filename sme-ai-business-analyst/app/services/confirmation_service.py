@@ -97,18 +97,20 @@ class ConfirmationService:
         return "pending"
 
     async def latest_actionable(
-        self, db: AsyncSession, business_id: UUID
+        self, db: AsyncSession, business_id: UUID, member_id: UUID | None = None
     ) -> Confirmation | None:
-        result = await db.execute(
+        stmt = (
             select(Confirmation)
             .where(
                 Confirmation.business_id == business_id,
                 Confirmation.status.in_(("pending", "needs_edit")),
                 Confirmation.expires_at > datetime.now(UTC),
             )
-            .order_by(Confirmation.created_at.desc())
-            .limit(1)
         )
+        if member_id is not None:
+            stmt = stmt.where(Confirmation.member_id == member_id)
+        stmt = stmt.order_by(Confirmation.created_at.desc()).limit(1)
+        result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
     async def confirm(self, db: AsyncSession, confirmation: Confirmation) -> str:
@@ -122,6 +124,8 @@ class ConfirmationService:
         if transaction:
             transaction.status = "confirmed"
             transaction.confirmed_at = confirmation.confirmed_at
+            if confirmation.member_id and not transaction.created_by_member_id:
+                transaction.created_by_member_id = confirmation.member_id
             if transaction.is_credit and transaction.customer_id:
                 debt_res = await db.execute(
                     select(Debt).where(Debt.transaction_id == transaction.id).limit(1)
@@ -139,6 +143,7 @@ class ConfirmationService:
                     debt = Debt(
                         business_id=transaction.business_id,
                         customer_id=transaction.customer_id,
+                        created_by_member_id=confirmation.member_id,
                         transaction_id=transaction.id,
                         amount=transaction.amount or Decimal("0"),
                         currency=transaction.currency or "NGN",
@@ -148,7 +153,35 @@ class ConfirmationService:
                     )
                     db.add(debt)
                     await db.flush()
-            return confirmation_success_text(transaction.transaction_type, is_credit=transaction.is_credit)
+            low_stock_msg = None
+            if transaction.transaction_type == "sale" and transaction.item_name and transaction.quantity:
+                norm_item = transaction.item_name.strip().lower()
+                inv_res = await db.execute(
+                    select(InventoryItem)
+                    .where(
+                        InventoryItem.business_id == transaction.business_id,
+                        InventoryItem.normalized_item_name == norm_item,
+                    )
+                    .limit(1)
+                )
+                item = inv_res.scalar_one_or_none()
+                if item:
+                    item.quantity_on_hand -= transaction.quantity
+                    item.updated_at = datetime.now(UTC)
+                    item.last_updated_from_confirmation_id = confirmation.id
+                    threshold = item.low_stock_threshold
+                    if threshold is not None and item.quantity_on_hand <= threshold:
+                        unit_str = f" {item.unit}" if item.unit else ""
+                        low_stock_msg = (
+                            f"\n\n⚠️ Low Stock Alert: {item.item_name} is down to {item.quantity_on_hand:g}{unit_str} "
+                            f"(reorder threshold: {threshold:g}{unit_str})."
+                        )
+                    await db.flush()
+
+            base_text = confirmation_success_text(transaction.transaction_type, is_credit=transaction.is_credit)
+            if low_stock_msg:
+                base_text += low_stock_msg
+            return base_text
 
         move_result = await db.execute(
             select(InventoryMovement)

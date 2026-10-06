@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import get_db_session
 from app.services.google_drive_service import GoogleDriveService
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ async def google_drive_oauth_callback(
     code: str | None = Query(None),
     state: str | None = Query(None),
     error: str | None = Query(None),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
 ) -> HTMLResponse:
     """
     Handles Google OAuth redirect after user consents to drive.file permissions.
@@ -83,7 +83,7 @@ async def google_drive_oauth_callback(
 @router.get("/status/{business_id}")
 async def get_drive_status(
     business_id: UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
 ):
     integration = await drive_service.get_integration(db, business_id)
     if not integration:
@@ -99,7 +99,7 @@ async def get_drive_status(
 @router.post("/trigger-backup/{business_id}")
 async def trigger_manual_backup(
     business_id: UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
 ):
     result = await drive_service.export_monthly_backup_for_business(db, business_id)
     return result

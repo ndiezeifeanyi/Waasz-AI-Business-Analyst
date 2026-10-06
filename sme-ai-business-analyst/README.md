@@ -19,6 +19,7 @@ A production-grade, multi-tenant AI assistant operating over WhatsApp Cloud API,
 - 🔒 **Privacy & Right-to-be-Forgotten**: Instant atomic erasure of user activities, documents, embeddings, and conversation histories via `"forget me"` verification.
 - 👥 **Group Chat Ready (Meta OBA Gated)**: Ready-to-enable group messaging module gated strictly on Meta Official Business Account verification and mention-only triggers.
 - 💰 **Dynamic Cost Governance**: Hard $0.50/day per-user limit with dynamic systemic ceiling (`max(10.0, active_users * 0.50 * 1.25)`) and 80% soft alert. Unit cost < $0.02/user/month.
+- 🌐 **Live Market & News Intelligence**: Instant real-time foreign exchange conversion (USD/NGN/EUR/GBP/GHS) and live business news summaries with verified web citations, resiliently powered by Open Exchange Rates and Google News RSS.
 - 🔐 **Production Security**: JWT RBAC, HMAC-SHA256 webhook signatures, prompt injection detection, and input sanitization.
 
 ## Architecture
@@ -400,6 +401,8 @@ Founder dashboard available at `/admin/metrics` (requires authentication)
 - ❌ No multi-language support yet
 - ❌ No SMS fallback (WhatsApp-only)
 - ❌ Simplified AI confidence (future: probabilistic models)
+- ℹ️ **Live Information Scope & Grounding**: Live search is currently backed by public real-time APIs (Open Exchange Rates for forex and Google News RSS for headlines) synthesized via Groq/OpenAI LLM inference, **NOT** by Gemini's native Google Search Grounding (which is currently blocked by Google AI Studio's unbilled 20 requests/day Free-Tier ceiling). For queries outside exchange rates and major news headlines, the assistant gracefully informs the user rather than hallucinating: *"I can't access live information for that right now. Currently, my real-time updates cover live exchange rates and major news headlines."*
+- ℹ️ **Gemini Free-Tier Rate Limits**: Operating on an unbilled Google AI Studio Gemini API key imposes a hard project-wide ceiling of 20 requests/day (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`). Enabling Pay-As-You-Go billing in Google Cloud Console is required to unlock full Gemini vision, native search grounding, and high-throughput production usage.
 
 ## Roadmap
 

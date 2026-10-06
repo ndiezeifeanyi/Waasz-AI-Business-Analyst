@@ -20,9 +20,15 @@ class AuditLog(Base):
     actor_user_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
+    member_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     action: Mapped[str] = mapped_column(String(160))
     entity_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
     entity_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    before_state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    after_state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    wamid: Mapped[str | None] = mapped_column(String(160), nullable=True)
     extra_metadata: Mapped[dict] = mapped_column(
         "metadata", JSONB, server_default=text("'{}'::jsonb")
     )

@@ -82,3 +82,20 @@ def test_midnight_and_timezone_boundary():
     formatted = format_confirmation_time(parsed, "Africa/Lagos")
     assert "25 Sep" in formatted
     assert "WAT" in formatted
+
+
+def test_ambiguous_time_expressions():
+    from app.utils.reminder_parser import is_ambiguous_time_expression
+
+    # Ambiguous phrases without specific time must return True
+    assert is_ambiguous_time_expression("remind me to call supplier later today") is True
+    assert is_ambiguous_time_expression("remind me sometime today") is True
+    assert is_ambiguous_time_expression("call Ngozi later on") is True
+    assert is_ambiguous_time_expression("remind me later") is True
+    assert is_ambiguous_time_expression("sometime later please") is True
+
+    # Phrases with specific time must return False (not ambiguous)
+    assert is_ambiguous_time_expression("remind me later today at 5pm") is False
+    assert is_ambiguous_time_expression("remind me in 30 mins") is False
+    assert is_ambiguous_time_expression("tomorrow at 9am") is False
+    assert is_ambiguous_time_expression("by 3pm") is False

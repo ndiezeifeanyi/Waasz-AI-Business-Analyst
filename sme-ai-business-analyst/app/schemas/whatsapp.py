@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class ParsedWhatsAppMessage(BaseModel):
@@ -18,3 +18,10 @@ class WhatsAppSendResult(BaseModel):
     message_id: str | None = None
     skipped: bool = False
     error_message: str | None = None
+    success: bool | None = None
+
+    @model_validator(mode="after")
+    def compute_success(self):
+        if self.success is None:
+            self.success = bool(self.message_id and not self.error_message and not self.skipped)
+        return self

@@ -29,10 +29,14 @@ async def cleanup_compliance_test_records():
     from app.models.customer import Customer
     from app.models.receipt_template import ReceiptTemplate
     from app.models.google_drive_integration import GoogleDriveIntegration
+    from app.models.member import Member
 
-    test_phones = [normalize_phone(f"+234805555500{i}") for i in range(1, 10)] + [
-        normalize_phone(f"+234805555600{i}") for i in range(1, 10)
-    ] + [normalize_phone(f"+234805555700{i}") for i in range(1, 10)]
+    test_phones_raw = [
+        f"+234805555{series}{i:03d}"
+        for series in (5, 6, 7, 8, 9)
+        for i in range(1, 20)
+    ]
+    test_phones = list(set(test_phones_raw + [normalize_phone(p) for p in test_phones_raw]))
 
     async def _do_cleanup():
         async with async_session_factory() as session:
@@ -46,6 +50,7 @@ async def cleanup_compliance_test_records():
             await session.execute(delete(Customer).where(Customer.business_id.in_(biz_ids_subq)))
             await session.execute(delete(WhatsAppMessage).where(WhatsAppMessage.from_phone.in_(test_phones)))
             await session.execute(delete(WhatsAppMessage).where(WhatsAppMessage.to_phone.in_(test_phones)))
+            await session.execute(delete(Member).where(Member.business_id.in_(biz_ids_subq) | Member.wa_id.in_(test_phones)))
             await session.execute(delete(User).where(User.phone_number.in_(test_phones)))
             await session.execute(delete(Business).where(Business.phone_number.in_(test_phones)))
             await session.execute(delete(InviteCode).where(InviteCode.code.like("COMPL-%")))
@@ -381,7 +386,34 @@ async def test_phase2_scoped_ai_disclaimer_negative_assertions():
 
 
 def _extract_pdf_text_streams(pdf_bytes: bytes) -> str:
-    return pdf_bytes.decode("latin1", errors="ignore")
+    import base64
+    import re
+    import zlib
+
+    text_chunks = [pdf_bytes.decode("latin1", errors="ignore")]
+    for stream in re.findall(rb"stream[\r\n]+(.*?)[\r\n]*endstream", pdf_bytes, re.DOTALL):
+        clean_stream = stream.strip()
+        # Case 1: ASCII85 + FlateDecode (ReportLab standard compression)
+        try:
+            a85_data = clean_stream
+            if not a85_data.endswith(b"~>"):
+                a85_data += b"~>"
+            decoded_a85 = base64.a85decode(a85_data, adobe=True)
+            decompressed = zlib.decompress(decoded_a85)
+            text_chunks.append(decompressed.decode("latin1", errors="ignore"))
+            continue
+        except Exception:
+            pass
+
+        # Case 2: Direct FlateDecode
+        try:
+            decompressed = zlib.decompress(clean_stream)
+            text_chunks.append(decompressed.decode("latin1", errors="ignore"))
+            continue
+        except Exception:
+            pass
+
+    return "\n".join(text_chunks)
 
 
 @pytest.mark.asyncio
@@ -1020,4 +1052,244 @@ async def test_phase4_whatsapp_connect_and_disconnect_commands():
             disc_reply = mock_send.call_args[0][1]
             assert "disconnected" in disc_reply.lower()
             assert "revoked" in disc_reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_part2_tool_failure_never_returns_done_or_false_success():
+    """
+    Regression test for Part 2:
+    A tool call that fails (or returns degraded info) must NEVER produce 'Done!'
+    or any success-sounding reply, either via fallback or via hallucinated LLM followup.
+    """
+    from langchain_core.messages import AIMessage
+    from app.services.agent_service import AgentService
+    from app.services.live_info_service import GROUNDING_FAIL_MESSAGE
+
+    phone = "+2348055557006"
+    norm_phone = normalize_phone(phone)
+
+    async with async_session_factory() as session:
+        biz = Business(name="Honesty Test Biz", phone_number=norm_phone)
+        session.add(biz)
+        await session.flush()
+        user = User(business_id=biz.id, phone_number=norm_phone, role="owner")
+        session.add(user)
+        await session.commit()
+
+        agent_svc = AgentService()
+
+        # Scenario A: Tool fails with GROUNDING_FAIL_MESSAGE, LLM followup fails/returns None
+        ai_msg_with_tool = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "get_current_information",
+                "args": {"query": "dollar rate today"},
+                "id": "call_info_1",
+            }]
+        )
+        with patch.object(agent_svc.ai_client, "invoke_agent", new_callable=AsyncMock) as mock_invoke, \
+             patch.object(agent_svc.live_info_service, "get_current_information", new_callable=AsyncMock) as mock_info:
+            
+            # Initial invocation returns tool call
+            mock_res1 = MagicMock()
+            mock_res1.message = ai_msg_with_tool
+            # Followup invocation fails (returns None)
+            mock_invoke.side_effect = [mock_res1, None]
+            mock_info.return_value = GROUNDING_FAIL_MESSAGE
+
+            reply = await agent_svc.process_user_message(
+                db=session,
+                business=biz,
+                user=user,
+                user_message="what is the dollar rate today?",
+            )
+
+            assert "Done!" not in reply
+            assert "I've updated that for you" not in reply
+            assert reply == GROUNDING_FAIL_MESSAGE
+
+        # Scenario B: Tool returns Error, LLM followup hallucinates "Done! I've updated that for you."
+        ai_msg_with_err_tool = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "create_reminder",
+                "args": {"title": "Call client"},
+                "id": "call_rem_1",
+            }]
+        )
+        ai_msg_hallucinated_done = AIMessage(
+            content="Done! I've updated that for you.",
+        )
+        with patch.object(agent_svc.ai_client, "invoke_agent", new_callable=AsyncMock) as mock_invoke, \
+             patch.object(agent_svc, "_execute_tool", new_callable=AsyncMock) as mock_exec:
+
+            mock_res_tool = MagicMock()
+            mock_res_tool.message = ai_msg_with_err_tool
+            mock_res_done = MagicMock()
+            mock_res_done.message = ai_msg_hallucinated_done
+            mock_invoke.side_effect = [mock_res_tool, mock_res_done]
+
+            mock_exec.return_value = ("Error: Could not determine reminder due time.", False)
+
+            reply_b = await agent_svc.process_user_message(
+                db=session,
+                business=biz,
+                user=user,
+                user_message="remind me to call client",
+            )
+
+            # Guard MUST override hallucinated Done!
+            assert "Done!" not in reply_b
+            assert "I've updated that for you" not in reply_b
+            assert "I couldn't complete that" in reply_b
+            assert "Could not determine reminder due time" in reply_b
+
+
+def test_part3_conversational_strategic_business_advice_system_prompt_rule():
+    """
+    Assert that the system prompt instructs the agent to append the scoped AI disclaimer
+    when giving conversational strategic/predictive business advice, and not on plain confirmations.
+    """
+    from app.services.agent_service import AgentService
+    from app.services.analytics_service import AI_ADVISORY_DISCLAIMER
+
+    agent = AgentService()
+    biz = Business(name="Strategic Advice Co")
+    user = User(display_name="Founder", niche="sme_owner")
+
+    prompt = agent._build_system_prompt(biz, user, datetime.now(UTC), "Africa/Lagos")
+
+    assert "SCOPED AI ADVISORY DISCLAIMER" in prompt
+    assert AI_ADVISORY_DISCLAIMER in prompt
+    assert "strategic business advice" in prompt.lower()
+    assert "DO NOT append this disclaimer to plain transactional confirmations" in prompt
+
+
+@pytest.mark.asyncio
+async def test_part5_dashboard_magic_link_adversarial_isolation():
+    """
+    CRITICAL ADVERSARIAL TEST:
+    Prove that Business A's magic link token can NEVER be used, guessed, or modified
+    to reveal Business B's transactions or metrics.
+    """
+    from decimal import Decimal
+    from httpx import ASGITransport, AsyncClient
+    from app.main import app
+    from app.models.transaction import Transaction
+    from app.services.magic_link_service import MagicLinkService
+
+    phone_a = normalize_phone("+2348055558001")
+    phone_b = normalize_phone("+2348055558002")
+
+    async with async_session_factory() as session:
+        biz_a = Business(name="Business Alpha", phone_number=phone_a)
+        biz_b = Business(name="Business Beta", phone_number=phone_b)
+        session.add_all([biz_a, biz_b])
+        await session.flush()
+
+        user_a = User(business_id=biz_a.id, phone_number=phone_a, role="owner")
+        user_b = User(business_id=biz_b.id, phone_number=phone_b, role="owner")
+        session.add_all([user_a, user_b])
+        await session.flush()
+
+        # Add secret sales for Business A
+        tx_a = Transaction(
+            business_id=biz_a.id,
+            amount=Decimal("50000.00"),
+            transaction_type="sale",
+            item_name="Alpha Secret Widget",
+            currency="NGN",
+            status="confirmed",
+            occurred_at=datetime.now(UTC),
+        )
+        # Add secret sales for Business B
+        tx_b = Transaction(
+            business_id=biz_b.id,
+            amount=Decimal("999999.00"),
+            transaction_type="sale",
+            item_name="Beta Highly Confidential Product",
+            currency="NGN",
+            status="confirmed",
+            occurred_at=datetime.now(UTC),
+        )
+        session.add_all([tx_a, tx_b])
+        await session.commit()
+
+        magic_svc = MagicLinkService()
+        token_a = await magic_svc.create_link(session, biz_a.id, expires_in_days=2)
+        token_b = await magic_svc.create_link(session, biz_b.id, expires_in_days=2)
+        await session.commit()
+
+        # Test via HTTP API using ASGI transport
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            # 1. Honest request for Business A: loads only A's data
+            resp_a = await client.get(f"/reports/data/{token_a}")
+            assert resp_a.status_code == 200
+            data_a = resp_a.json()["data"]
+            # Total sales for A must equal 50000
+            total_sales_a = sum(d["sales"] for d in data_a)
+            assert total_sales_a == 50000.00
+
+            # 2. Honest request for Business B: loads only B's data
+            resp_b = await client.get(f"/reports/data/{token_b}")
+            assert resp_b.status_code == 200
+            data_b = resp_b.json()["data"]
+            total_sales_b = sum(d["sales"] for d in data_b)
+            assert total_sales_b == 999999.00
+
+            # 3. Adversarial Attempt: Attacker tampers with token (guesses random token)
+            fake_token = token_a[:-4] + "xxxx"
+            resp_fake = await client.get(f"/reports/data/{fake_token}")
+            assert resp_fake.status_code == 403
+            assert "Invalid or expired link" in resp_fake.json()["detail"]
+
+            # 4. Adversarial Attempt: Attacker tries to pass another business_id query param
+            resp_inject = await client.get(f"/reports/data/{token_a}?business_id={biz_b.id}")
+            assert resp_inject.status_code == 200
+            # Result must STILL reflect ONLY Business A, never Business B!
+            data_inject = resp_inject.json()["data"]
+            assert sum(d["sales"] for d in data_inject) == 50000.00
+
+
+@pytest.mark.asyncio
+async def test_part3_reminder_ambiguity_triggers_clarification():
+    """
+    Assert that ambiguous time phrases like 'later today' trigger a clarifying question
+    and do NOT schedule an arbitrary time without asking.
+    """
+    from app.services.agent_service import AgentService
+
+    phone = normalize_phone("+2348055559001")
+    async with async_session_factory() as session:
+        biz = Business(name="Ambiguity Test Biz", phone_number=phone)
+        session.add(biz)
+        await session.flush()
+        user = User(business_id=biz.id, phone_number=phone, role="owner")
+        session.add(user)
+        await session.commit()
+
+        agent_svc = AgentService()
+
+        # In offline fallback
+        reply = await agent_svc._offline_fallback_handling(
+            db=session,
+            business=biz,
+            user=user,
+            user_message="remind me to call supplier later today",
+        )
+        assert "What time" in reply or "time works for you" in reply.lower()
+
+        # In tool execution
+        tool_args = {"title": "Call supplier", "due_at_iso": "2026-10-02T18:00:00Z"}
+        res, was_inter = await agent_svc._execute_tool(
+            db=session,
+            business=biz,
+            user=user,
+            tool_name="create_reminder",
+            tool_args=tool_args,
+            raw_user_text="remind me to call supplier later today",
+        )
+        assert "Clarification Needed:" in res
+        assert "What time works for you?" in res
 

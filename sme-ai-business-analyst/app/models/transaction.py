@@ -42,6 +42,10 @@ class Transaction(Base):
     customer_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
     )
+    created_by_member_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_wamid: Mapped[str | None] = mapped_column(String(160), nullable=True)
     extra_metadata: Mapped[dict] = mapped_column(
         "metadata", JSONB, server_default=text("'{}'::jsonb")
     )

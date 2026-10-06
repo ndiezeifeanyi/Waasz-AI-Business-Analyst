@@ -34,28 +34,26 @@ def test_niche_fallback_qa_messages_deleted():
     assert "NICHE_FALLBACK_QA_MESSAGES" not in src, "agent_service should not reference NICHE_FALLBACK_QA_MESSAGES"
 
 
-def test_core_identity_never_centers_on_business_across_niches():
-    """Verify core identity line never hard-anchors on 'business assistant'."""
+def test_core_identity_is_business_first_with_supporting_personal_capabilities():
+    """Verify core identity is primarily business-first with personal features as supporting capabilities."""
     agent = AgentService()
     now_utc = datetime.now(UTC)
     business = Business(id=uuid4(), name="Test Trading")
 
     niches = ["sme_owner", "student", "employee_9_to_5", "freelancer", "personal"]
     expected_core = (
-        "You are Waasz, a WhatsApp AI assistant that helps with whatever the person needs — "
-        "from business tracking to reminders, notes, goals, and everyday questions."
+        "You are Waasz, an AI business assistant built primarily to help business owners run, track, and grow their businesses."
     )
 
     for niche in niches:
         user = User(id=uuid4(), business_id=business.id, display_name="Alex", niche=niche)
         prompt = agent._build_system_prompt(business, user, now_utc, "Africa/Lagos")
 
-        # Must contain the new universal identity sentence
+        # Must contain the business-first primary identity
         assert expected_core in prompt
-
-        # Must NEVER contain the old rigid business-only phrasing
-        assert "You are a warm, sharp, street-smart WhatsApp AI business assistant for" not in prompt
-        assert "You are an AI business assistant" not in prompt
+        assert "Your core, primary identity is business-first" in prompt
+        assert "strictly secondary, supporting capabilities" in prompt
+        assert "Never claim an equal dual identity" in prompt
 
 
 def test_system_prompt_whatsapp_formatting_rules_present():

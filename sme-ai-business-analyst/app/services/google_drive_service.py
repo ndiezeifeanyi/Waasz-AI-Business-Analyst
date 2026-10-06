@@ -65,8 +65,13 @@ class GoogleDriveService:
         Builds Google OAuth authorization URL requesting least-privilege drive.file scope.
         """
         state = self.generate_state(business_id=business_id, user_id=user_id)
+        if not settings.google_client_id or "placeholder" in settings.google_client_id.lower():
+            raise ValueError(
+                "Google OAuth Client ID is unconfigured or placeholder (GOOGLE_CLIENT_ID). "
+                "Please configure a valid Web client ID in Google Cloud Console."
+            )
         params = {
-            "client_id": settings.google_client_id or "GOOGLE_CLIENT_ID_PLACEHOLDER",
+            "client_id": settings.google_client_id,
             "redirect_uri": settings.google_oauth_redirect_uri,
             "response_type": "code",
             "scope": f"{DRIVE_FILE_SCOPE} https://www.googleapis.com/auth/userinfo.email",

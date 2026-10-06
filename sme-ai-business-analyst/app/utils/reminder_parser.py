@@ -22,8 +22,35 @@ PIDGIN_TIME_REPLACEMENTS = [
     (r"\bfor\s+evening\b", "at 6pm"),
     (r"\bfor\s+night\b", "at 8pm"),
     (r"\bsmall\s+time\b", "in 1 hour"),
-    (r"\blater\s+today\b", "in 3 hours"),
 ]
+
+AMBIGUOUS_TIME_PATTERNS = [
+    r"\blater\s+today\b",
+    r"\bsometime\s+today\b",
+    r"\blater\s+on\b",
+    r"\bsometime\s+later\b",
+    r"\bjust\s+remind\s+me\s+later\b",
+    r"\bwhen\s+free\b",
+    r"\blater\b",
+]
+
+
+def is_ambiguous_time_expression(text: str) -> bool:
+    """Returns True if the text contains vague/ambiguous temporal phrases without a specific time."""
+    lower = text.lower()
+    has_specific_time = bool(
+        re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", lower)
+        or re.search(r"\b(?:in|after)\s+\d+\s*(?:sec|second|min|minute|hr|hour|day)s?\b", lower)
+        or re.search(r"\b(?:at|by)\s+\d{1,2}(?::\d{2})?\b", lower)
+    )
+    if has_specific_time:
+        return False
+
+    for pat in AMBIGUOUS_TIME_PATTERNS:
+        if re.search(pat, lower):
+            return True
+    return False
+
 
 # Patterns that indicate a temporal phrase is present
 TEMPORAL_INDICATORS = [

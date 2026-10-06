@@ -76,15 +76,85 @@ class AccessControlService:
             await db.commit()
         return tester
 
-    async def remove_approved_tester(self, db: AsyncSession, phone: str) -> bool:
-        """Remove a phone number from approved testers."""
+    async def remove_approved_tester(self, db: AsyncSession, phone: str, delete_user_account: bool = False) -> bool:
+        """Remove a phone number from approved testers, and optionally delete their user account."""
         norm_phone = normalize_phone(phone)
         stmt = delete(ApprovedTester).where(ApprovedTester.phone_number == norm_phone)
         res = await db.execute(stmt)
         deleted = (res.rowcount or 0) > 0
+
+        if delete_user_account:
+            await self.delete_user(db, norm_phone)
+
         if hasattr(db, "commit"):
             await db.commit()
         return deleted
+
+    async def delete_user(self, db: AsyncSession, phone_or_id: str) -> bool:
+        """
+        Delete a user from the database completely by phone number or UUID.
+        Also cleans up approved_testers if present.
+        """
+        from uuid import UUID
+
+        user = None
+        try:
+            uid = UUID(str(phone_or_id))
+            user = await db.get(User, uid)
+        except (ValueError, TypeError):
+            pass
+
+        if not user:
+            phone_str = str(phone_or_id).strip()
+            norm = normalize_phone(phone_str)
+            res = await db.execute(
+                select(User).where(
+                    (User.phone_number == norm)
+                    | (User.phone_number == phone_str)
+                    | (User.phone_number == phone_str.lstrip("+"))
+                ).limit(1)
+            )
+            user = res.scalar_one_or_none()
+
+        if not user:
+            return False
+
+        u_phone = user.phone_number
+        # Also remove from approved_testers if exists
+        await db.execute(
+            delete(ApprovedTester).where(
+                (ApprovedTester.phone_number == u_phone)
+                | (ApprovedTester.phone_number == u_phone.lstrip("+"))
+                | (ApprovedTester.phone_number == f"+{u_phone.lstrip('+')}")
+            )
+        )
+
+        await db.delete(user)
+        if hasattr(db, "commit"):
+            await db.commit()
+        return True
+
+    async def sync_allowlist_with_users(self, db: AsyncSession) -> dict:
+        """
+        Sync approved_testers with users table:
+        Removes any user account in users that is not in approved_testers.
+        """
+        testers = await self.list_approved_testers(db)
+        tester_phones = {t.phone_number for t in testers}
+        tester_phones.update({f"+{t.phone_number}" for t in testers})
+        tester_phones.update({t.phone_number.lstrip("+") for t in testers})
+
+        all_users = (await db.execute(select(User))).scalars().all()
+        deleted = 0
+        for u in all_users:
+            if u.phone_number not in tester_phones and u.phone_number.lstrip("+") not in tester_phones:
+                await db.delete(u)
+                deleted += 1
+
+        if hasattr(db, "commit"):
+            await db.commit()
+
+        return {"deleted_orphan_users": deleted, "remaining_users": len(all_users) - deleted}
 
     async def list_approved_testers(self, db: AsyncSession) -> list[ApprovedTester]:
         """List all approved testers."""
@@ -92,19 +162,113 @@ class AccessControlService:
         res = await db.execute(stmt)
         return list(res.scalars().all())
 
+    async def get_max_active_users(self, db: AsyncSession) -> int:
+        """Fetch current max active users setting from system_settings, fallback to settings."""
+        runtime_limit = getattr(settings, "max_active_users", 20)
+        if runtime_limit != 20:
+            return runtime_limit
+        try:
+            from sqlalchemy import text
+            res = await db.execute(text("SELECT value FROM system_settings WHERE key = 'max_active_users' LIMIT 1"))
+            val = res.scalar()
+            if val is not None:
+                return int(val)
+        except Exception as e:
+            logger.debug("Failed to read max_active_users from system_settings: %s", e)
+        return runtime_limit
+
+    async def set_max_active_users(self, db: AsyncSession, limit: int) -> int:
+        """Update max active users in system_settings and runtime settings."""
+        from sqlalchemy import text
+        await db.execute(
+            text("""
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES ('max_active_users', :val, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """),
+            {"val": str(limit)},
+        )
+        settings.max_active_users = limit
+        if hasattr(db, "commit"):
+            await db.commit()
+        return limit
+
+    async def get_access_mode(self, db: AsyncSession) -> str:
+        """Fetch current access mode setting from system_settings, fallback to settings."""
+        runtime_mode = getattr(settings, "access_mode", "allowlist").lower().strip()
+        if runtime_mode != "allowlist":
+            return runtime_mode
+        try:
+            from sqlalchemy import text
+            res = await db.execute(text("SELECT value FROM system_settings WHERE key = 'access_mode' LIMIT 1"))
+            val = res.scalar()
+            if val is not None:
+                return str(val).lower().strip()
+        except Exception as e:
+            logger.debug("Failed to read access_mode from system_settings: %s", e)
+        return runtime_mode
+
+    async def set_access_mode(self, db: AsyncSession, mode: str) -> str:
+        """Update access mode in system_settings and runtime settings."""
+        from sqlalchemy import text
+        norm_mode = mode.lower().strip()
+        await db.execute(
+            text("""
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES ('access_mode', :val, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """),
+            {"val": norm_mode},
+        )
+        settings.access_mode = norm_mode
+        if hasattr(db, "commit"):
+            await db.commit()
+        return norm_mode
+
+    async def purge_test_users(self, db: AsyncSession, protected_phones: list[str] | None = None) -> int:
+        """
+        Purge synthetic automated test users while strictly preserving approved testers and primary accounts.
+        """
+        testers = await self.list_approved_testers(db)
+        tester_phones = {t.phone_number for t in testers}
+        tester_phones.update({f"+{t.phone_number}" for t in testers})
+        tester_phones.update({t.phone_number.lstrip("+") for t in testers})
+
+        protected = set(protected_phones or ["2347065015924", "+2347065015924", "2348012345678", "+2348012345678"])
+        protected.update(tester_phones)
+
+        all_users = (await db.execute(select(User))).scalars().all()
+        to_delete = [
+            u for u in all_users
+            if u.phone_number not in protected and u.phone_number.lstrip("+") not in protected
+        ]
+
+        if not to_delete:
+            return 0
+
+        for u in to_delete:
+            await db.delete(u)
+
+        if hasattr(db, "commit"):
+            await db.commit()
+
+        return len(to_delete)
+
     async def get_status(self, db: AsyncSession) -> dict:
         """Get live access control metrics."""
         active_users = await self.get_active_user_count(db)
         tester_stmt = select(func.count(ApprovedTester.id))
         tester_res = await db.execute(tester_stmt)
         tester_count = tester_res.scalar() or 0
+        mode = await self.get_access_mode(db)
+        max_users = await self.get_max_active_users(db)
 
         return {
-            "access_mode": settings.access_mode,
-            "max_active_users": settings.max_active_users,
+            "access_mode": mode,
+            "max_active_users": max_users,
             "active_users_count": active_users,
             "approved_testers_count": tester_count,
-            "capacity_reached": active_users >= settings.max_active_users,
+            "capacity_reached": active_users >= max_users,
         }
 
     async def evaluate_access(
@@ -118,19 +282,33 @@ class AccessControlService:
         """
         Single gate evaluation before get_or_create_business_and_user() is ever called.
         """
-        mode = getattr(settings, "access_mode", "allowlist").lower().strip()
+        mode = await self.get_access_mode(db)
         text_body = (text or "").strip()
 
         # Strategy 1: OPEN mode
         if mode == "open":
             return AccessDecision(allowed=True, reason="open_mode")
 
+        # Multi-staff team member bypass: If this phone is an active or invited member of a business, admit them
+        try:
+            from app.models.member import Member
+            mem_chk = await db.execute(
+                select(Member).where(
+                    (Member.wa_id == norm_phone) | (Member.wa_id == raw_phone),
+                    Member.status.in_(("active", "invited")),
+                ).limit(1)
+            )
+            if mem_chk.scalar_one_or_none() is not None:
+                return AccessDecision(allowed=True, reason="team_member_bypass")
+        except Exception:
+            pass
+
         # Strategy 2: ALLOWLIST mode
         if mode == "allowlist":
             # 1. Independent hard cap on real users (only applies to new user registrations)
             if not is_existing_user:
                 active_users = await self.get_active_user_count(db)
-                max_users = getattr(settings, "max_active_users", 20)
+                max_users = await self.get_max_active_users(db)
                 if active_users >= max_users:
                     logger.warning(
                         "Allowlist gate rejected %s: user cap reached (%d/%d)",

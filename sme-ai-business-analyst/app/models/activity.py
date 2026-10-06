@@ -22,6 +22,9 @@ class Activity(Base):
     business_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("businesses.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    created_by_member_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     activity_type: Mapped[str] = mapped_column(String(50), index=True)
     title: Mapped[str] = mapped_column(String(300))
     details: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))

@@ -110,6 +110,48 @@ class WhatsAppClient:
         }
         return await self._post(payload)
 
+    async def send_document_bytes(
+        self,
+        to_phone: str,
+        file_bytes: bytes,
+        filename: str,
+        caption: str | None = None,
+        mime_type: str = "application/pdf",
+    ) -> WhatsAppSendResult:
+        """Upload document bytes to Meta and send to the specified WhatsApp phone number."""
+        if not self._is_configured:
+            return WhatsAppSendResult(
+                skipped=True, error_message="WhatsApp credentials are not set"
+            )
+        media_id = await self.upload_media(file_bytes, mime_type)
+        if not media_id:
+            return WhatsAppSendResult(error_message="Failed to upload document to WhatsApp media service")
+        return await self.send_document(to_phone, media_id, filename, caption)
+
+    async def send_interactive_buttons(
+        self, to_phone: str, body: str, buttons: list[tuple[str, str]]
+    ) -> WhatsAppSendResult:
+        """Send a message with custom quick-reply buttons (id, label)."""
+        if not self._is_configured:
+            return WhatsAppSendResult(
+                skipped=True, error_message="WhatsApp credentials are not set"
+            )
+        btn_payloads = [
+            {"type": "reply", "reply": {"id": b_id, "title": b_title[:20]}}
+            for b_id, b_title in buttons[:3]
+        ]
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body},
+                "action": {"buttons": btn_payloads},
+            },
+        }
+        return await self._post(payload)
+
     async def upload_media(self, file_content: bytes, mime_type: str) -> str | None:
         """Upload media to Meta and return the media ID."""
         if not self._is_configured:
@@ -145,9 +187,16 @@ class WhatsAppClient:
                 response.raise_for_status()
                 data = response.json()
                 message_id = (data.get("messages") or [{}])[0].get("id")
-                return WhatsAppSendResult(message_id=message_id)
+                return WhatsAppSendResult(message_id=message_id, success=True)
+            except httpx.HTTPStatusError as exc:
+                try:
+                    err_json = exc.response.json()
+                    msg = err_json.get("error", {}).get("message") or exc.response.text
+                    return WhatsAppSendResult(error_message=f"Meta Error ({exc.response.status_code}): {msg}", success=False)
+                except Exception:
+                    return WhatsAppSendResult(error_message=f"HTTP {exc.response.status_code}: {exc.response.text or str(exc)}", success=False)
             except httpx.HTTPError as exc:
-                return WhatsAppSendResult(error_message=str(exc))
+                return WhatsAppSendResult(error_message=str(exc), success=False)
 
     async def send_template(
         self,

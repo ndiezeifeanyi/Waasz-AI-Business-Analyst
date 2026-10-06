@@ -137,6 +137,8 @@ class ModelResolver:
 
     def get_model(self, provider: Provider, capability: Capability) -> str:
         """Return the currently cached/overridden model name immediately without network call."""
+        if capability == "image_gen" and not getattr(settings, "enable_image_generation", False):
+            return ""
         override = self.get_override(provider, capability)
         if override:
             return override
@@ -240,6 +242,9 @@ class ModelResolver:
         ]
 
         for prov, cap in tasks:
+            if cap == "image_gen" and not getattr(settings, "enable_image_generation", False):
+                self._cache[(prov, cap)] = ""
+                continue
             override = self.get_override(prov, cap)
             if override:
                 self._cache[(prov, cap)] = override

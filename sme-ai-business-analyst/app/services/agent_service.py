@@ -33,10 +33,11 @@ from app.models.user import User
 from app.schemas.extraction import ExtractedRecord
 from app.services.ai_client import AiClient
 from app.services.ai_extraction import AiExtractionService
-from app.services.analytics_service import AnalyticsService
+from app.services.analytics_service import AI_ADVISORY_DISCLAIMER, AnalyticsService
 from app.services.confirmation_service import build_confirmation_text, ConfirmationService
 from app.services.goal_service import GoalService
 from app.services.image_service import ImageService
+from app.schemas.actor import ActorContext
 from app.services.intent_router import IntentRouter
 from app.services.knowledge_service import KnowledgeService
 from app.services.ledger_service import LedgerService
@@ -45,7 +46,8 @@ from app.services.media_downloader import MediaDownloader
 from app.services.memory_service import MemoryService
 from app.services.qa_service import QaService
 from app.services.task_service import TaskService
-from app.services.unified_report_service import UnifiedReportService
+from app.services.staff_service import StaffService
+from app.services.unified_report_service import UnifiedReportService, sanitize_whatsapp_clean_text
 from app.services.whatsapp_client import WhatsAppClient
 from app.utils.reminder_parser import format_confirmation_time, parse_reminder_time
 
@@ -79,28 +81,36 @@ class SetItemCostInput(BaseModel):
 
 
 class SetReorderThresholdInput(BaseModel):
-    """Set an optional reorder threshold (low-stock alert level) for an inventory item (e.g. 'alert me when rice drops below 5 bags'). When inventory drops to or below this quantity after a sale, a proactive low-stock alert is generated."""
+    """Set or update the reorder threshold (low-stock alert level) and optionally the current quantity on hand for an inventory item (e.g. 'alert me when rice drops below 15 bags, I currently have 20 bags'). If the user mentions their current stock count in the same message, ALWAYS capture it in `current_quantity` so both are set in one step."""
     model_config = {"title": "set_reorder_threshold"}
     item_name: str = Field(description="Name of the inventory item, e.g. 'rice', 'cement'")
-    threshold: float = Field(description="Minimum quantity threshold below which to alert the owner, e.g. 5 for 5 bags")
+    threshold: float = Field(description="Minimum quantity threshold below which to alert the owner, e.g. 15 for 15 bags")
+    current_quantity: float | None = Field(default=None, description="Optional current stock quantity on hand if stated by the user (e.g. 20 if user says 'I currently have 20 bags').")
+
+
+class CorrectStockLevelInput(BaseModel):
+    """Set or correct the current physical stock quantity on hand for an inventory item directly (e.g. 'I have 20 bags of rice', 'correct rice stock to 20', 'set rice inventory to 20 bags'). Does NOT require unit cost or purchase price — use this whenever the user is stating, correcting, or reconciling their actual physical stock count, without conflating it with recording a purchase or expense."""
+    model_config = {"title": "correct_stock_level"}
+    item_name: str = Field(description="Name of the product or inventory item, e.g. 'rice', 'cement'")
+    actual_quantity: float = Field(description="The actual physical count / quantity on hand to set, e.g. 20 for 20 bags")
 
 
 class GenerateReceiptInput(BaseModel):
-    """Generate and deliver an official PDF receipt (for cash/transfer sale) or invoice (for credit sale) directly to the user's WhatsApp. Call immediately whenever the user requests a receipt (e.g. 'generate my receipt', 'send receipt', 'receipt please') without asking redundant questions."""
+    """Generate and deliver an official PDF receipt (for cash/transfer sale) or invoice (for credit sale) directly to the user's WhatsApp. Call ONLY when the user explicitly requests a receipt or invoice (e.g. 'generate my receipt', 'send receipt', 'receipt please', 'invoice'). DO NOT call this tool when the user is asking for charts, trend graphs, performance summaries, or dashboards."""
     model_config = {"title": "generate_receipt"}
     transaction_id: str | None = Field(default=None, description="Optional UUID of the specific transaction. Leave None/omitted to automatically use the most recent confirmed sale.")
 
 
 class SetReceiptTemplateInput(BaseModel):
-    """Set or initialize the persistent business receipt and invoice template (business name, address, contact phone, contact email, payment terms, footer note). This ensures all future receipts and invoices automatically carry professional branding."""
+    """Set or initialize the business receipt and invoice template (business name, logo, address, contact phone, contact email, payment terms, footer note). ALL fields are optional — defaults will be used for any omitted fields."""
     model_config = {"title": "set_receipt_template"}
-    business_display_name: str = Field(description="Official business name to print at the top of receipts and invoices.")
-    contact_phone: str = Field(description="Business contact phone number for receipts.")
-    address: str | None = Field(default=None, description="Physical store or office address (e.g. '12 Commercial Avenue, Yaba, Lagos').")
+    business_display_name: str | None = Field(default=None, description="Optional official business name to print at the top of receipts/invoices. Defaults to registered business name if omitted.")
+    contact_phone: str | None = Field(default=None, description="Optional business contact phone number for receipts. Defaults to user's registered phone number if omitted.")
+    address: str | None = Field(default=None, description="Optional physical store or office address (e.g. '12 Commercial Avenue, Yaba, Lagos').")
     contact_email: str | None = Field(default=None, description="Optional business email address.")
     payment_terms_note: str | None = Field(default=None, description="Optional payment terms or bank details (e.g. 'Payment due within 7 days to GTBank 0123456789').")
     footer_note: str | None = Field(default=None, description="Optional custom footer message (e.g. 'No refund after 3 days. Thanks for your patronage!').")
-    business_logo: str | None = Field(default=None, description="Optional URL or identifier of the business logo.")
+    business_logo: str | None = Field(default=None, description="Optional photo URL, identifier, or local media path of the business logo.")
 
 
 class UpdateReceiptTemplateInput(BaseModel):
@@ -173,13 +183,14 @@ class GetCashFlowForecastInput(BaseModel):
 
 
 class CreateReminderInput(BaseModel):
-    """Schedule a reminder or task alert for a specific future date and time. Use whenever the user asks to be reminded, alerted, or to follow up on a task (e.g., 'in 3 mins', 'tomorrow 9am', 'today at 21:41'). Set is_alarm=True if the user requests an alarm or repeating reminder (e.g. 'alarm me', 'keep reminding me until I stop it')."""
+    """Schedule a reminder or task alert for a specific future date and time. Use ONLY when the user specifies a clear, unambiguous time (e.g., 'in 3 mins', 'tomorrow 9am', 'today at 17:00'). DO NOT call this tool if the user uses vague, ambiguous phrases like 'later today', 'sometime later', 'later on', or 'soon' without a specific time — instead, ask them conversationally what time works for them."""
     model_config = {"title": "create_reminder"}
     title: str = Field(description="Clear title of what needs to be done, e.g. 'Call supplier about rice delivery'")
     due_at_iso: str = Field(description="Target UTC time in ISO-8601 format (YYYY-MM-DDTHH:MM:SSZ). Compute relative times based on current server UTC time provided in the prompt.")
     description: str | None = Field(default=None, description="Optional notes or extra details")
     is_alarm: bool = Field(default=False, description="Set to True if the user asks for an alarm or repeating reminder until stopped (e.g. 'alarm me', 'keep reminding me until I stop it').")
-    repeat_interval_seconds: int = Field(default=60, description="Interval in seconds between repeat notifications for alarm mode (default 60).")
+    repeat_interval_seconds: int = Field(default=300, description="Interval in seconds between repeat notifications for alarm mode (default 300 / 5 minutes).")
+    max_repeats: int = Field(default=6, description="Maximum number of escalation repeats for alarm mode (default 6 = 30-minute escalation window).")
 
 
 class GenerateReportInput(BaseModel):
@@ -187,6 +198,12 @@ class GenerateReportInput(BaseModel):
     model_config = {"title": "generate_report"}
     cadence: str = Field(default="weekly", description="Reporting timeframe ('weekly' or 'monthly')")
     report_type: str = Field(default="unified", description="Report focus area ('unified', 'financial', 'productivity')")
+
+
+class GenerateFinancialChartInput(BaseModel):
+    """Generate and deliver an official visual financial trend chart (image) along with a working interactive web dashboard link directly to the user's WhatsApp chat. Call whenever the user asks to see their financial chart, trend chart, visual graph, or performance graph (e.g. 'show me my financial chart', 'send the chart', 'trend graph', 'I meant for this chart', 'chart dashboard')."""
+    model_config = {"title": "generate_financial_chart"}
+    period: str = Field(default="monthly", description="Timeframe for the financial chart: 'weekly' (7 days), 'monthly' (30 days), 'quarterly' (90 days), or 'yearly' (365 days). Defaults to 'monthly' if unspecified.")
 
 
 class StoreKnowledgeDocumentInput(BaseModel):
@@ -237,31 +254,82 @@ class GetHistoricalSummaryInput(BaseModel):
     record_type: str | None = Field(default=None, description="Optional filter by record type: 'sale', 'expense', or None for all records.")
 
 
-AGENT_TOOLS = [
-    RecordTransactionInput,
-    SetItemCostInput,
-    SetReorderThresholdInput,
-    GenerateReceiptInput,
-    SetReceiptTemplateInput,
-    UpdateReceiptTemplateInput,
-    ListOutstandingDebtsInput,
-    MarkDebtPaidInput,
-    DraftPaymentReminderInput,
-    GetMarginReportInput,
-    GetProductPerformanceAnalysisInput,
-    SimulatePricingInput,
-    LogUpcomingPayableInput,
-    GetCashFlowForecastInput,
-    CreateReminderInput,
-    GenerateReportInput,
-    GetHistoricalSummaryInput,
-    StoreKnowledgeDocumentInput,
-    ManageGoalInput,
-    RequestDataDeletionInput,
-    GenerateImageInput,
-    EditImageInput,
-    GetCurrentInformationInput,
-]
+class InviteStaffInput(BaseModel):
+    """Invite a staff member to join your business on Waasz. Only available to the business owner."""
+    model_config = {"title": "invite_staff_member"}
+    display_name: str = Field(description="Name of the staff member, e.g. 'Emeka' or 'Blessing'")
+    phone_number: str = Field(description="WhatsApp phone number of the staff member (e.g. '+2348012345678' or '08012345678')")
+
+
+class ListStaffInput(BaseModel):
+    """List all staff members and their invitation status for your business. Only available to the business owner."""
+    model_config = {"title": "list_staff_members"}
+
+
+class RemoveStaffInput(BaseModel):
+    """Remove a staff member from your business. Only available to the business owner."""
+    model_config = {"title": "remove_staff_member"}
+    identifier: str = Field(description="Name or phone number of the staff member to remove, e.g. 'Emeka' or '08012345678'")
+
+
+class VoidTransactionInput(BaseModel):
+    """Void or cancel a previously recorded transaction (sale or expense). Staff can void their own entries within 15 minutes of occurrence. Business owners can void any transaction at any time. When voided, inventory deductions are automatically restored and any linked customer debts are cancelled."""
+    model_config = {"title": "void_transaction"}
+    reason: str = Field(description="Reason for voiding the transaction, e.g. 'Customer changed mind', 'Duplicate entry', 'Wrong amount entered'")
+    identifier: str | None = Field(default=None, description="Optional transaction reference, amount, or item name to identify which transaction to void. If omitted, targets the most recent transaction.")
+
+
+class SetExpenseApprovalThresholdInput(BaseModel):
+    """Set or update the business expense approval threshold. When staff members log expenses at or above this threshold, the owner is automatically alerted via WhatsApp. Set to 0 to disable alerts. Only available to the business owner."""
+    model_config = {"title": "set_expense_approval_threshold"}
+    threshold_amount: float = Field(description="The threshold amount in Naira (e.g. 50000.0). Any expense recorded by staff >= this amount triggers an instant notification to the owner. Set to 0 to disable.")
+
+
+class GetTeamPerformanceInput(BaseModel):
+    """Retrieve team performance and sales breakdown by staff member. Only available to the business owner."""
+    model_config = {"title": "get_team_performance"}
+    period: str = Field(default="this_week", description="Timeframe: 'today', 'this_week', 'this_month', or 'all'")
+
+
+def get_agent_tools() -> list[type[BaseModel]]:
+    """Return active agent tools, conditionally omitting image generation tools if disabled."""
+    tools: list[type[BaseModel]] = [
+        RecordTransactionInput,
+        SetItemCostInput,
+        SetReorderThresholdInput,
+        CorrectStockLevelInput,
+        GenerateReceiptInput,
+        SetReceiptTemplateInput,
+        UpdateReceiptTemplateInput,
+        ListOutstandingDebtsInput,
+        MarkDebtPaidInput,
+        DraftPaymentReminderInput,
+        GetMarginReportInput,
+        GetProductPerformanceAnalysisInput,
+        SimulatePricingInput,
+        LogUpcomingPayableInput,
+        GetCashFlowForecastInput,
+        CreateReminderInput,
+        GenerateReportInput,
+        GenerateFinancialChartInput,
+        GetHistoricalSummaryInput,
+        StoreKnowledgeDocumentInput,
+        ManageGoalInput,
+        RequestDataDeletionInput,
+        GetCurrentInformationInput,
+        InviteStaffInput,
+        ListStaffInput,
+        RemoveStaffInput,
+        VoidTransactionInput,
+        SetExpenseApprovalThresholdInput,
+        GetTeamPerformanceInput,
+    ]
+    if settings.enable_image_generation:
+        tools.extend([GenerateImageInput, EditImageInput])
+    return tools
+
+
+AGENT_TOOLS = get_agent_tools()
 
 NICHE_INSTRUCTIONS = {
     "sme_owner": (
@@ -310,6 +378,7 @@ class AgentService:
         live_info_service: LiveInformationService | None = None,
         media_downloader: MediaDownloader | None = None,
         analytics: AnalyticsService | None = None,
+        staff: StaffService | None = None,
     ) -> None:
         self.ledger = ledger or LedgerService()
         self.extractor = extractor or AiExtractionService()
@@ -326,68 +395,70 @@ class AgentService:
         self.live_info_service = live_info_service or LiveInformationService(cost_monitor=self.ai_client.cost_monitor)
         self.media_downloader = media_downloader or MediaDownloader()
         self.analytics = analytics or AnalyticsService()
+        self.staff = staff or StaffService()
         self._recent_image_cache: dict[UUID, tuple[bytes, str]] = {}
 
-    def _build_system_prompt(self, business: Business, user: User, now_utc: datetime, business_tz: str) -> str:
+    def _build_system_prompt(
+        self,
+        business: Business,
+        user: User,
+        now_utc: datetime,
+        business_tz: str,
+        actor: ActorContext | None = None,
+    ) -> str:
         niche_key = getattr(user, "niche", "sme_owner") or "sme_owner"
-        niche_instruction = NICHE_INSTRUCTIONS.get(niche_key, NICHE_INSTRUCTIONS["personal"])
+        niche_instruction = NICHE_INSTRUCTIONS.get(niche_key, NICHE_INSTRUCTIONS["sme_owner"])
+        actor_role = actor.role if actor else getattr(user, "role", "owner")
+        actor_display = (actor.display_name if actor else None) or user.display_name or "Friend"
 
         return (
-            "You are Waasz, a WhatsApp AI assistant that helps with whatever the person needs — from business tracking to reminders, notes, goals, and everyday questions.\n\n"
-            "### VOICE & BEHAVIOR:\n"
-            "- Write like a real person on WhatsApp: friendly, crisp, concise, and clear.\n"
-            "- Keep replies to 1-3 sentences for general chat. Never be overly verbose.\n"
-            "- NEVER use corporate buzzwords, bulleted financial statements, or unsolicited audits on casual greetings or simple updates.\n"
-            "- Only provide detailed financial reports or breakdowns when explicitly requested by the user.\n"
-            "- When an action is completed, acknowledge it briefly and naturally.\n\n"
+            "You are Waasz, an AI business assistant built primarily to help business owners run, track, and grow their businesses.\n"
+            "Your core, primary identity is business-first: tracking sales, expenses, inventory turnover, customer debts, profit margins, cash flow, receipts, and performance reports.\n"
+            "While you also support personal assistant tasks (such as setting reminders, notes, goals, and casual chat), these are strictly secondary, supporting capabilities to ease the life of a busy business owner — NOT an equal co-identity.\n"
+            "When asked whether you are multipurpose or business-focused (or about your primary identity/focus), state clearly, concisely, and unequivocally that you are primarily business-focused, with personal-assistant features as supporting tools. Never claim an equal dual identity.\n\n"
             "### WHATSAPP FORMATTING RULES:\n"
-            "- Use single *asterisks* for bold sparingly (not on every noun or line).\n"
-            "- NEVER use markdown headers (no '#', '##', or '###') or nested markdown formatting.\n"
-            "- Use clean blank lines between paragraphs and sections for spacing instead of dense walls of hyphens, asterisks, or dividers.\n"
-            "- When a list is genuinely needed, use a simple line-per-item with a single leading emoji or dash — do NOT mix multiple competing bullet styles in one message.\n\n"
+            "- ZERO MARKDOWN HEADERS: NEVER use markdown headers (no '#', '##', or '###'). WhatsApp does NOT support markdown headers; they render as raw, unsightly hash characters.\n"
+            "- AVOID ASTERISK CLUTTER: Use single *asterisks* for bold sparingly — never wrap entire lines, headings, or multiple nouns in asterisks.\n"
+            "- CLEAN LISTS: When a list is genuinely needed, use a simple line-per-item with a single leading emoji or dash. Do NOT mix multiple competing bullet styles or wrap every line in bold.\n"
+            "- SPACING & BREVITY: Use clean blank lines between paragraphs and sections for spacing. Keep replies to 1-3 sentences for general chat. Never output dense walls of asterisks, hyphens, or dividers.\n\n"
+            "### IMAGE & RECEIPT UNDERSTANDING:\n"
+            "- RECEIPT / INVOICE / EXPENSE: When the user sends an image of a paper receipt, bill, or invoice, extract the total, items, vendor, and call the `record_transaction` tool directly.\n"
+            "- GENERAL PHOTO / SCENE / OBJECT: When the user sends any general photo, scene, or object, describe it conversationally using multimodal vision.\n\n"
+            "### TOOL EXECUTION & OUTCOME ACCURACY RULES:\n"
+            "- HONEST OUTCOME REPORTING ONLY: You must NEVER claim an action was successful, never say 'Done!', 'I've updated that for you', or 'Success' unless the tool execution explicitly succeeded.\n"
+            "- REPORTING TOOL ERRORS & CLARIFICATIONS: If a tool returns an error or clarification message, communicate that limitation or question honestly to the user on your very first reply. Never gloss over it, never pretend it succeeded, and NEVER tell the user 'Done!' when a tool needs clarification or failed.\n\n"
+            "### SCOPED AI ADVISORY DISCLAIMER:\n"
+            "- MANDATORY DISCLAIMER RULE: When you provide strategic business advice, business growth playbooks, pricing strategy recommendations, marketing strategies, or predictive business forecasts conversationally, you MUST append this exact short disclaimer at the end of your message on a new line:\n"
+            f"\"{AI_ADVISORY_DISCLAIMER}\"\n"
+            "- DO NOT append this disclaimer to plain transactional confirmations, receipts, reminders, task updates, casual chat, greetings, or routine factual answers.\n\n"
             "### CONTEXT & ATTENTION RULES:\n"
             "- The blocks below (memory, pending items, tasks, goals) are background reference only. Respond first and foremost to what the user just said. Do not proactively bring up or restate pending items or tasks unless the user's current message is clearly about them.\n"
             "- CRITICAL TURN ATTENTION: Focus your answer strictly on the user's latest incoming message. Do not proactively revisit, re-ask, or try to resolve topics, old reminders, or incomplete sales from earlier turns in the conversation history unless the user explicitly asks about them.\n"
             "- OVERDUE OR PASSED REMINDERS: If a reminder time requested in the past has already passed, DO NOT proactively bring it up, nag, or ask if the user wants to reschedule it. Only discuss a reminder if the user is currently asking about it.\n"
             "- When the user sends a greeting (e.g. 'Hi', 'Hey', 'Good morning'), reply ONLY with a warm, natural greeting. NEVER attach questions or follow-ups about earlier sales, expenses, reminders, or tasks.\n\n"
-            "### AUTHORITATIVE CAPABILITIES (YOU HAVE DIRECT ACCESS TO THESE VIA TOOLS):\n"
-            "You have real, working tool access. NEVER claim you cannot perform these actions, NEVER claim you lack PDF generation, and NEVER tell the user you cannot create documents or track debts:\n"
-            "1. Reminders & Alarms: You CAN schedule reminders for any relative or absolute time using the `create_reminder` tool. Never tell the user to use their phone's clock or alarm app.\n"
-            "2. Sales & Expenses: You CAN stage sales and expenses into the ledger using the `record_transaction` tool (amount in Naira is mandatory). If an amount is missing, ask for it naturally.\n"
-            "3. Reports: You CAN generate weekly and monthly summary reports using `generate_report`.\n"
-            "4. Notes & Documents: You CAN save price lists, customer contacts, or project notes using `store_knowledge_document`.\n"
-            "5. Goals: You CAN record and track milestones using `manage_goal`.\n"
-            "6. Image Generation & Editing: You CAN generate new images using `generate_image` and edit existing images using `edit_image`. Both tools deliver images directly to WhatsApp. You must NOT generate images of real, identifiable people.\n"
-            "7. Live/Current Information: You CAN search for and retrieve real-time facts, news, today's events, sports scores, and current prices using `get_current_information`. Always invoke this tool for anything that requires current live knowledge or may have changed recently. NEVER guess or fabricate current information from stale training data.\n"
-            "8. Instant PDF Receipts & Invoices: You CAN generate official, downloadable PDF receipts (for cash/transfer sales) and PDF invoices (for credit sales) directly to WhatsApp using `generate_receipt`. When asked 'can you generate a PDF?', 'can you create receipts?', or similar, ALWAYS confirm affirmatively and enthusiastically that you CAN generate downloadable PDF receipts and invoices for any sale or transaction. CRITICAL ACTION FOR RECEIPTS: Whenever the user says 'generate my receipt', 'send receipt', 'give me receipt', or asks for a receipt after recording a sale, DO NOT ask them to repeat the sale details or amount — call `generate_receipt(transaction_id=None)` to produce and dispatch the PDF receipt. PERSISTENT TEMPLATES: Businesses have a persistent receipt template (business name, address, phone, email, payment terms). If `generate_receipt` returns a notice that no template exists yet, or if a user wants to set up their receipts, guide them conversationally to provide their business display name, address, and phone number, then save it using `set_receipt_template`. If they want to change their address or details later, use `update_receipt_template`.\n"
-            "9. Debt Tracking & Customer Reminders: You CAN track customer debts, record credit sales with due dates, list outstanding debtors using `list_outstanding_debts`, mark debts as paid using `mark_debt_paid`, and draft courteous ready-to-forward payment reminders for the owner using `draft_payment_reminder`. Always mention debt tracking when asked what you can do.\n"
-            "10. Low-Stock Alerts & Inventory Tracking: You CAN track inventory quantities, set reorder threshold alerts using `set_reorder_threshold(item_name, threshold)`, and deliver proactive low-stock alerts when stock drops to or below the reorder threshold after a sale.\n"
-            "11. Unit Cost & Profit Margin Auditing: You CAN set item cost price (COGS) using `set_item_cost(item_name, unit_cost)` and audit profit margins per-item or across the business using `get_margin_report` (e.g. 'what is my margin on rice?').\n"
-            "12. 80/20 Pareto Analysis & Dead Stock Detection: You CAN identify top 80% revenue-driving products and detect dead stock tying up working capital using `get_product_performance_analysis`.\n"
-            "13. Deterministic Pricing Simulation: You CAN simulate discount effects on profit margins and calculate exact required prices for target margins using `simulate_pricing` (deterministic math).\n"
-            "14. Cash Flow Forecasting & Payables: You CAN log upcoming supplier payables or bills using `log_upcoming_payable` and predict cash flow shortfalls using `get_cash_flow_forecast`.\n\n"
-            "### DATA PERMANENCE, CONTINUITY & ACCOUNT RECOVERY RULES:\n"
-            "- DATA IS PERMANENT & CLOUD-SECURED: All sales, expenses, debts, inventory, and business records are permanently stored in our secure encrypted cloud database and tied directly to the user's registered phone number — NOT to local phone storage, NOT to WhatsApp cloud backup, and NOT to a WhatsApp login session.\n"
-            "- SAME PHONE NUMBER: If a user changes phones, reinstalls WhatsApp, or loses their physical device, their entire business history is immediately intact as soon as they message in from their SAME registered phone number.\n"
-            "- CHANGING PHONE NUMBERS (CRITICAL PRODUCTION RULE): If a user changes or loses their phone number, recovery is NEVER automatic! The bot must NEVER claim, promise, or imply that records automatically move or transfer to a new phone number. To protect business security, transferring an account to a new phone number strictly requires admin-assisted account recovery where support verifies their identity and relinks their business profile and transaction history to the new number. Advise them to contact support/admin if they ever plan to switch phone numbers.\n"
-            "- ANSWERING 'WILL MY DATA DISAPPEAR?' / DATA SAFETY QUESTIONS: When the user asks 'how do I know my data won't just disappear?', 'what happens if I lose my phone?', or asks about data safety, explain clearly and accurately:\n"
-            "  1. Their data is permanently saved in the secure cloud database, not stored on their local phone.\n"
-            "  2. Their account is permanently tied to their registered phone number (+ their country code).\n"
-            "  3. Even if they lose or switch their physical phone, all records remain intact as long as they keep their phone number.\n"
-            "  4. If they ever change to a NEW phone number, their data is not lost, but they must contact admin/support for an admin-assisted account recovery to verify ownership and relink their business history to the new number.\n"
-            "  NEVER say 'once you log back into WhatsApp your data is restored' or reference WhatsApp backup.\n\n"
-            "### IMPORTANT GUARDRAIL (CUSTOMER OUTREACH & DEBT REMINDERS):\n"
-            "- Waasz can draft a payment-reminder message for the business owner to review and send themselves, but must NEVER send WhatsApp messages directly to a customer's phone number on the business's behalf. That customer never opted into this bot, and unsolicited business-initiated outreach to a number that hasn't messaged in is both a WhatsApp policy risk and a real consent problem. The reminder is always delivered back to the OWNER, for the owner to forward themselves.\n\n"
-            "### IMAGE & RECEIPT UNDERSTANDING:\n"
-            "- When an image is attached to the conversation:\n"
-            "  * RECEIPT / INVOICE / EXPENSE: If the photo depicts a receipt, invoice, bill, POS receipt, transfer receipt, or expense document with monetary amounts, extract the transaction details (type 'sale' or 'expense', amount in Naira, item_name, description) and call the `record_transaction` tool to stage it for interactive confirmation.\n"
-            "  * GENERAL PHOTO / SCENE / OBJECT: If the photo is a general photograph, place, person, product, or document that is not a transaction receipt, describe what you see or answer the user's caption naturally using your vision capability.\n\n"
+            "### AUTHORITATIVE TOOL CAPABILITIES:\n"
+            "1. Reminders & Alarms: Schedule reminders with `create_reminder`. Use ONLY when the user provides an unambiguous, specific time. For vague phrases like 'later today' or 'soon', DO NOT call `create_reminder` — ask: 'What time works for you?'\n"
+            "2. Sales & Expenses: Stage sales and expenses in Naira using `record_transaction`.\n"
+            "3. Instant PDF Receipts & Invoices: Generate official PDF receipts/invoices directly to WhatsApp using `generate_receipt`. When a user requests a receipt for a transaction (e.g. 'I need a receipt for 10 books at 3000 each'): stage the sale with `record_transaction` including customer_name if specified. If customer name was not specified, you may ask who to bill or bill to 'Walk-in Customer'. When a user provides business branding or profile details (e.g. 'my business name is...', 'set business name to...', 'set address to...', 'my shop address is...'), immediately save it with `set_receipt_template` or `update_receipt_template` so their official name, address, and contact details appear on all future receipts. Users can also send their store logo photo in chat with caption 'Set logo'.\n"
+            "4. Debt Tracking: Track customer credit sales, list debtors with `list_outstanding_debts`, mark debts as paid with `mark_debt_paid`, and draft customer payment reminders for the owner with `draft_payment_reminder`.\n"
+            "5. Low-Stock Alerts & Inventory: Track inventory quantities and set reorder threshold alerts using `set_reorder_threshold`. If the user specifies BOTH a threshold and their current stock level in the same message (e.g. 'Alert me when my rice stock reduces to 15 bags, I currently have 20 bags'), capture both in `set_reorder_threshold` (`threshold=15`, `current_quantity=20`). Correct or update actual physical counts directly without requiring unit cost using `correct_stock_level`.\n"
+            "6. Unit Cost & Profit Margins: Set item cost price (COGS) with `set_item_cost`, audit profit margins with `get_margin_report`, 80/20 Pareto with `get_product_performance_analysis`, and simulate pricing with `simulate_pricing`.\n"
+            "7. Cash Flow Forecasting: Log upcoming supplier payables using `log_upcoming_payable` and predict shortfalls using `get_cash_flow_forecast`.\n"
+            "8. Reports, Visual Charts & Live Dashboard: Generate summary text reports using `generate_report`. When the user asks to see their financial chart, trend graph, or performance chart (e.g. 'show me my financial chart', 'I meant for this chart', 'send financial graph', 'chart dashboard'), ALWAYS call `generate_financial_chart` to generate and deliver the visual chart image along with their live interactive dashboard link. You CAN and DO generate visual financial charts on demand. NEVER tell the user you cannot generate visual charts or graphs. Save durable notes/price lists with `store_knowledge_document`.\n"
+            "9. Live/Current Information: Retrieve real-time facts, currency exchange rates, or news using `get_current_information`.\n"
+            "10. Creative Image Generation vs Charts: You CANNOT generate artistic/illustrative photos or creative drawings (reply 'I can't generate creative images right now' if asked to draw art). However, business financial charts and graphs ARE fully supported via `generate_financial_chart`.\n"
+            "11. Multi-Staff Team Management & Analytics (Owner Only): As a business owner, you can view team sales and staff contribution breakdown with `get_team_performance(period)`. You can invite new staff members with `invite_staff_member(display_name, phone_number)`, view current team members with `list_staff_members()`, and remove staff members with `remove_staff_member(identifier)`. Staff members do NOT have permission to invite, list, or remove team members, nor view team performance.\n"
+            "12. Voiding Transactions & 15-Minute Window: Cancel or void accidental entries with `void_transaction(reason, identifier)`. Staff members can only void their own entries within 15 minutes of occurrence; after 15 minutes, instruct them to ask the business owner. Owners can void any transaction at any time. Voiding automatically reverses inventory deductions and cancels linked debts.\n"
+            "13. Expense Approval Threshold (Owner Only): Owners can configure an expense approval threshold with `set_expense_approval_threshold(threshold_amount)`. When staff members log expenses at or above this threshold, the owner is automatically alerted via WhatsApp.\n\n"
+            "### DATA PERMANENCE, CONTINUITY & SECURITY RULES:\n"
+            "- All business records are permanently stored in our secure encrypted cloud database tied to the user's registered phone number.\n"
+            "- Changing phone numbers strictly requires admin-assisted account recovery.\n"
+            "- Never send WhatsApp messages directly to customers; debt reminders are delivered to the owner to forward.\n\n"
             f"### TIME CONTEXT:\n"
-            f"- Current UTC Time: {now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
-            f"- Business Timezone: {business_tz}\n"
-            "- Always compute relative time expressions ('in 3 mins', 'tomorrow 9am') relative to the Current UTC Time.\n\n"
-            f"### USER PROFILE & NICHE:\n"
-            f"User display name: {user.display_name or 'Friend'} | Role: {niche_key}\n"
+            f"- Current UTC Time: {now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} | Business Timezone: {business_tz}\n\n"
+            f"### USER PROFILE & ROLE CONTEXT:\n"
+            f"User display name: {actor_display} | Role: {actor_role} | Niche: {niche_key}\n"
+            f"{'You are interacting with a staff member. They record sales and expenses for the business.' if actor_role == 'staff' else 'You are interacting with the business owner with full management access.'}\n"
             f"{niche_instruction}\n"
         )
 
@@ -400,6 +471,8 @@ class AgentService:
         inbound_message_id: UUID | None = None,
         image_bytes: bytes | None = None,
         image_mime_type: str = "image/jpeg",
+        actor: ActorContext | None = None,
+        source_wamid: str | None = None,
     ) -> str:
         """
         Execute full conversational agent turn:
@@ -409,6 +482,15 @@ class AgentService:
         4. Execute tool calls server-side (injecting verified tenant IDs).
         5. Return natural conversational text to send to user.
         """
+        if actor is None:
+            actor = ActorContext(
+                business_id=business.id,
+                member_id=None,
+                role=getattr(user, "role", "owner") or "owner",
+                wa_id=user.phone_number,
+                display_name=user.display_name,
+            )
+
         if image_bytes:
             self._recent_image_cache[user.id] = (image_bytes, image_mime_type)
 
@@ -425,6 +507,8 @@ class AgentService:
                 user=user,
                 user_message=user_message,
                 inbound_message_id=inbound_message_id,
+                actor=actor,
+                source_wamid=source_wamid,
             )
 
         # 1. Fetch short-term history and durable context
@@ -459,11 +543,13 @@ class AgentService:
         # 2. Build system prompt
         now_utc = datetime.now(UTC)
         business_tz = getattr(business, "timezone", None) or settings.local_timezone
-        system_prompt = self._build_system_prompt(business, user, now_utc, business_tz)
+        system_prompt = self._build_system_prompt(business, user, now_utc, business_tz, actor=actor)
 
         pending_conf = None
         try:
-            pending_conf = await self.confirmations.latest_actionable(db, business.id)
+            pending_conf = await self.confirmations.latest_actionable(
+                db, business.id, member_id=actor.member_id
+            )
         except Exception as exc:
             logger.warning("Failed to retrieve pending confirmation: %s", exc)
 
@@ -518,11 +604,13 @@ class AgentService:
         else:
             messages.append(HumanMessage(content=user_message))
 
+        active_tools = get_agent_tools()
+
         # 4. Invoke LLM with tools
         try:
             agent_result = await self.ai_client.invoke_agent(
                 messages=messages,
-                tools=AGENT_TOOLS,
+                tools=active_tools,
                 operation="agent_chat",
                 db=db,
                 business_id=business.id,
@@ -548,14 +636,19 @@ class AgentService:
         MAX_TOOL_ITERATIONS = 2
         iteration = 0
         current_ai_msg = ai_msg
+        last_tool_results: list[tuple[str, str]] = []
 
         while iteration < MAX_TOOL_ITERATIONS:
             tool_calls = getattr(current_ai_msg, "tool_calls", None) or []
             if not tool_calls:
                 reply_text = str(getattr(current_ai_msg, "content", "") or "").strip()
                 if not reply_text:
-                    reply_text = "I'm here. How can I help you today?"
-                return reply_text
+                    if last_tool_results:
+                        return sanitize_whatsapp_clean_text(self._resolve_fallback_tool_reply(last_tool_results))
+                    return "I'm here. How can I help you today?"
+                if self._has_tool_failure(last_tool_results) and self._is_generic_success_phrase(reply_text):
+                    return sanitize_whatsapp_clean_text(self._resolve_fallback_tool_reply(last_tool_results))
+                return sanitize_whatsapp_clean_text(reply_text)
 
             iteration += 1
             messages.append(current_ai_msg)
@@ -574,11 +667,14 @@ class AgentService:
                     tool_args=tool_args,
                     raw_user_text=user_message,
                     inbound_message_id=inbound_message_id,
+                    actor=actor,
+                    source_wamid=source_wamid,
                 )
                 if was_interactive:
                     interactive_prompt_sent = True
 
                 messages.append(ToolMessage(content=tool_result_str, tool_call_id=call_id))
+                last_tool_results.append((str(tool_name), tool_result_str))
 
             # If interactive buttons were sent (e.g. confirmation prompt for transaction),
             # return empty string to prevent sending duplicate plain text
@@ -588,21 +684,140 @@ class AgentService:
             # Re-invoke agent with tool results
             followup_result = await self.ai_client.invoke_agent(
                 messages=messages,
-                tools=AGENT_TOOLS,
+                tools=active_tools,
                 operation=f"agent_tool_followup_iter{iteration}",
                 db=db,
                 business_id=business.id,
             )
 
             if not followup_result or not followup_result.message:
-                return "Done! I've updated that for you."
+                return sanitize_whatsapp_clean_text(self._resolve_fallback_tool_reply(last_tool_results))
 
             current_ai_msg = followup_result.message
 
         final_text = str(getattr(current_ai_msg, "content", "") or "").strip()
         if final_text:
-            return final_text
-        return "Done! I've updated that for you."
+            # Audit guard against false-success hallucination when a tool explicitly failed
+            if self._has_tool_failure(last_tool_results) and self._is_generic_success_phrase(final_text):
+                return sanitize_whatsapp_clean_text(self._resolve_fallback_tool_reply(last_tool_results))
+            final_text = self._maybe_append_advisory_disclaimer(user_message, final_text)
+            return sanitize_whatsapp_clean_text(final_text)
+        return sanitize_whatsapp_clean_text(self._resolve_fallback_tool_reply(last_tool_results))
+
+    def _maybe_append_advisory_disclaimer(self, user_message: str, reply: str) -> str:
+        """
+        Ensure strategic, predictive, or financial business advice given in plain conversation
+        reliably bears the standard AI advisory disclaimer.
+        """
+        if not reply or AI_ADVISORY_DISCLAIMER in reply:
+            return reply
+
+        combined = (user_message + " " + reply).lower()
+        strategic_signals = [
+            "landing page",
+            "business strategy",
+            "marketing plan",
+            "cash flow",
+            "pricing strategy",
+            "improve margin",
+            "increase margin",
+            "grow my business",
+            "sales pipeline",
+            "value proposition",
+            "lead magnet",
+            "financial advice",
+            "forecast",
+        ]
+        if any(signal in combined for signal in strategic_signals):
+            return f"{reply}\n\n{AI_ADVISORY_DISCLAIMER}"
+        return reply
+
+    def _has_tool_failure(self, tool_results: list[tuple[str, str]]) -> bool:
+        """Check if any executed tool failed, errored, or had degraded availability."""
+        for _, res in tool_results:
+            lower = res.lower()
+            if (
+                res.startswith("Error:")
+                or res.startswith("Cost Limit:")
+                or "error executing" in lower
+                or "cannot access live information" in lower
+                or "can't access live information" in lower
+            ):
+                return True
+        return False
+
+    def _is_generic_success_phrase(self, text: str) -> bool:
+        """Detect generic 'Done!' or false success phrases."""
+        clean = text.strip().lower()
+        phrases = [
+            "done!",
+            "done.",
+            "i've updated that for you",
+            "i have updated that for you",
+            "updated!",
+            "success!",
+            "it is done",
+        ]
+        return any(clean.startswith(p) or clean == p for p in phrases)
+
+    def _resolve_fallback_tool_reply(self, tool_results: list[tuple[str, str]]) -> str:
+        """
+        Produce an honest, accurate message based on actual tool outcomes.
+        NEVER returns a blind generic 'Done!' without confirmed success.
+        """
+        if not tool_results:
+            return "I have processed your request."
+
+        # 1. Grounding failure from live_info_service
+        for _, res in tool_results:
+            if "can't access live information" in res.lower() or "cannot access live information" in res.lower():
+                return res
+
+        # 2. Explicit Error or Cost Limit results
+        for _, res in tool_results:
+            if res.startswith("Error:") or res.startswith("Cost Limit:") or "error executing" in res.lower():
+                clean_err = res.removeprefix("Error:").strip()
+                return f"I couldn't complete that: {clean_err}"
+
+        # 3. Explicit Notice or Clarification results (e.g., receipt template required, ambiguous time)
+        for _, res in tool_results:
+            if res.startswith("Notice:"):
+                return res.removeprefix("Notice:").strip()
+            if res.startswith("Clarification Needed:"):
+                return res.removeprefix("Clarification Needed:").strip()
+
+        # 4. Pending confirmation results (e.g. data deletion)
+        for _, res in tool_results:
+            if res.startswith("Pending Confirmation:"):
+                return res.removeprefix("Pending Confirmation:").strip()
+
+        # 5. Informational tools return their summary text directly
+        info_tools = {
+            "list_outstanding_debts",
+            "get_margin_report",
+            "get_product_performance_analysis",
+            "simulate_pricing",
+            "get_cash_flow_forecast",
+            "get_historical_summary",
+            "draft_payment_reminder",
+            "get_current_information",
+            "get_team_performance",
+        }
+        for tool_name, res in tool_results:
+            if tool_name in info_tools and not res.startswith("Error:"):
+                return res
+
+        # 6. Specific success confirmations
+        for _, res in tool_results:
+            if res.startswith("Success:"):
+                return res.removeprefix("Success:").strip()
+
+        # Fallback to the latest tool's raw result if non-empty
+        latest_res = tool_results[-1][1].strip()
+        if latest_res:
+            return latest_res
+
+        return "I encountered an issue processing that. Please try again."
 
     async def _execute_tool(
         self,
@@ -613,6 +828,8 @@ class AgentService:
         tool_args: dict[str, Any],
         raw_user_text: str,
         inbound_message_id: UUID | None = None,
+        actor: ActorContext | None = None,
+        source_wamid: str | None = None,
     ) -> tuple[str, bool]:
         """
         Execute tool with server-enforced security boundaries.
@@ -622,6 +839,14 @@ class AgentService:
 
         try:
             if tool_name == "create_reminder":
+                from app.utils.reminder_parser import is_ambiguous_time_expression
+                if is_ambiguous_time_expression(raw_user_text):
+                    return (
+                        "Clarification Needed: The requested time is ambiguous (e.g. 'later today'). "
+                        "Do NOT schedule the reminder yet. Ask the user conversationally: 'What time works for you?'",
+                        False,
+                    )
+
                 title = tool_args.get("title") or "Follow-up reminder"
                 due_at_iso = tool_args.get("due_at_iso")
                 description = tool_args.get("description")
@@ -641,7 +866,11 @@ class AgentService:
                     due_at_utc = parse_reminder_time(raw_user_text, timezone_name=business_tz)
 
                 if not due_at_utc:
-                    return "Error: Could not determine reminder due time. Please ask the user what time they want to be reminded.", False
+                    return (
+                        "Clarification Needed: Could not determine reminder due time. "
+                        "Ask the user conversationally: 'What time works for you?'",
+                        False,
+                    )
 
                 lower_text = raw_user_text.lower()
                 alarm_phrases = (
@@ -655,7 +884,11 @@ class AgentService:
                     "repeating reminder",
                     "alarm mode",
                 )
-                is_alarm_mode = bool(is_alarm_arg or any(p in lower_text for p in alarm_phrases))
+                is_alarm_mode = bool(
+                    is_alarm_arg
+                    or getattr(settings, "default_reminders_to_alarm_mode", False)
+                    or any(p in lower_text for p in alarm_phrases)
+                )
 
                 task = await self.tasks.create_task(
                     db,
@@ -666,6 +899,7 @@ class AgentService:
                     due_at=due_at_utc,
                     is_alarm_mode=is_alarm_mode,
                     repeat_interval_seconds=repeat_interval_seconds,
+                    created_by_member_id=actor.member_id if actor else None,
                 )
                 formatted_time = format_confirmation_time(due_at_utc, business_tz)
                 if is_alarm_mode:
@@ -724,6 +958,8 @@ class AgentService:
                     inbound_message_id or business.id,
                     extraction,
                     record,
+                    member_id=actor.member_id if actor else None,
+                    source_wamid=source_wamid,
                 )
 
                 conf_text = confirmation.confirmation_text or build_confirmation_text(record)
@@ -751,23 +987,56 @@ class AgentService:
             elif tool_name == "set_reorder_threshold":
                 item_name = tool_args.get("item_name")
                 threshold = tool_args.get("threshold")
+                current_quantity = tool_args.get("current_quantity")
                 if not item_name or threshold is None:
                     return "Error: item_name and threshold are required.", False
-                item = await self.ledger.set_reorder_threshold(db, business.id, item_name, threshold)
-                return f"Success: Reorder threshold for '{item.item_name}' set to {threshold:g}. You will be alerted when stock falls to or below this level.", False
+                item = await self.ledger.set_reorder_threshold(
+                    db, business.id, item_name, threshold, current_quantity=current_quantity
+                )
+                msg = f"Success: Reorder threshold for '{item.item_name}' set to {threshold:g}."
+                if current_quantity is not None:
+                    msg += f" Current stock level set to {item.quantity_on_hand:g}."
+                msg += " You will be alerted when stock falls to or below this level."
+                return msg, False
+
+            elif tool_name == "correct_stock_level":
+                item_name = tool_args.get("item_name")
+                actual_quantity = tool_args.get("actual_quantity")
+                if not item_name or actual_quantity is None:
+                    return "Error: item_name and actual_quantity are required.", False
+                item = await self.ledger.correct_stock_level(
+                    db, business.id, item_name, actual_quantity
+                )
+                return f"Success: Stock count for '{item.item_name}' updated directly to {item.quantity_on_hand:g}.", False
 
             elif tool_name == "set_receipt_template":
                 from app.services.receipt_service import ReceiptService
+                import os
                 receipt_svc = ReceiptService()
-                biz_name = tool_args.get("business_display_name")
-                phone = tool_args.get("contact_phone")
+                biz_name = tool_args.get("business_display_name") or business.name
+                phone = tool_args.get("contact_phone") or business.phone_number or ""
                 addr = tool_args.get("address")
                 logo = tool_args.get("business_logo")
                 email = tool_args.get("contact_email")
                 terms = tool_args.get("payment_terms_note")
                 footer = tool_args.get("footer_note")
-                if not biz_name or not phone:
-                    return "Error: business_display_name and contact_phone are required.", False
+
+                # If user sent a photo in chat for their logo, pull from recent image cache
+                if user.id in self._recent_image_cache and (
+                    not logo or str(logo).lower() in {"photo", "image", "attached", "sent", "chat"} or "logo" in raw_user_text.lower()
+                ):
+                    img_bytes, mime = self._recent_image_cache[user.id]
+                    logos_dir = os.path.join(settings.media_download_dir, "logos")
+                    os.makedirs(logos_dir, exist_ok=True)
+                    ext = ".png" if "png" in mime else ".jpg"
+                    logo_path = os.path.join(logos_dir, f"logo_{business.id}{ext}")
+                    try:
+                        with open(logo_path, "wb") as f:
+                            f.write(img_bytes)
+                        logo = logo_path
+                    except Exception as e:
+                        logger.warning("Could not persist logo image: %s", e)
+
                 tmpl = await receipt_svc.set_template(
                     db,
                     business_id=business.id,
@@ -779,53 +1048,131 @@ class AgentService:
                     payment_terms_note=terms,
                     footer_note=footer,
                 )
+
+                # Check if there is a recent confirmed sale transaction to generate receipt for!
+                auto_receipt_msg = ""
+                tx_stmt = (
+                    select(Transaction)
+                    .where(
+                        Transaction.business_id == business.id,
+                        Transaction.transaction_type == "sale",
+                        Transaction.status == "confirmed",
+                    )
+                    .order_by(Transaction.occurred_at.desc())
+                    .limit(1)
+                )
+                tx_res = await db.execute(tx_stmt)
+                latest_tx = tx_res.scalar_one_or_none()
+                if latest_tx:
+                    try:
+                        pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
+                            db, business_id=business.id, transaction_id=latest_tx.id
+                        )
+                        send_res = await self.whatsapp.send_document_bytes(
+                            user.phone_number,
+                            pdf_bytes,
+                            filename=filename,
+                            caption=f"📄 Receipt #{filename.replace('.pdf', '')} - {tmpl.business_display_name}",
+                        )
+                        await self.ledger.record_outbound_message(
+                            db, business.id, user.phone_number, f"[Sent document {filename}]", send_res, user_id=user.id
+                        )
+                        auto_receipt_msg = f" I have also generated and sent your updated receipt '{filename}' with your new details to your WhatsApp!"
+                    except Exception as e:
+                        logger.warning("Could not auto-generate receipt in set_receipt_template: %s", e)
+
                 return (
-                    f"Success: Receipt template saved! Future receipts and invoices will automatically feature '{tmpl.business_display_name}', address '{tmpl.address or 'N/A'}', and phone '{tmpl.contact_phone}'.",
+                    f"Success: Receipt template saved! Future receipts and invoices will automatically feature '{tmpl.business_display_name}', address '{tmpl.address or 'N/A'}', and phone '{tmpl.contact_phone}'.{auto_receipt_msg}",
                     False,
                 )
 
             elif tool_name == "update_receipt_template":
                 from app.services.receipt_service import ReceiptService
+                import os
                 receipt_svc = ReceiptService()
                 clean_args = {k: v for k, v in tool_args.items() if v is not None}
+                # Check recent image cache if logo photo was sent
+                if user.id in self._recent_image_cache and (
+                    "logo" in raw_user_text.lower() or str(clean_args.get("business_logo", "")).lower() in {"photo", "image", "attached", "sent", "chat"}
+                ):
+                    img_bytes, mime = self._recent_image_cache[user.id]
+                    logos_dir = os.path.join(settings.media_download_dir, "logos")
+                    os.makedirs(logos_dir, exist_ok=True)
+                    ext = ".png" if "png" in mime else ".jpg"
+                    logo_path = os.path.join(logos_dir, f"logo_{business.id}{ext}")
+                    try:
+                        with open(logo_path, "wb") as f:
+                            f.write(img_bytes)
+                        clean_args["business_logo"] = logo_path
+                    except Exception as e:
+                        logger.warning("Could not persist logo image: %s", e)
+
                 tmpl = await receipt_svc.update_template(
                     db,
                     business_id=business.id,
                     **clean_args,
                 )
-                if not tmpl:
-                    biz_name = tool_args.get("business_display_name") or business.name
-                    phone = tool_args.get("contact_phone") or business.phone_number or ""
-                    tmpl = await receipt_svc.set_template(
-                        db,
-                        business_id=business.id,
-                        business_display_name=biz_name,
-                        contact_phone=phone,
-                        **clean_args,
+
+                auto_receipt_msg = ""
+                tx_stmt = (
+                    select(Transaction)
+                    .where(
+                        Transaction.business_id == business.id,
+                        Transaction.transaction_type == "sale",
+                        Transaction.status == "confirmed",
                     )
+                    .order_by(Transaction.occurred_at.desc())
+                    .limit(1)
+                )
+                tx_res = await db.execute(tx_stmt)
+                latest_tx = tx_res.scalar_one_or_none()
+                if latest_tx:
+                    try:
+                        pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
+                            db, business_id=business.id, transaction_id=latest_tx.id
+                        )
+                        send_res = await self.whatsapp.send_document_bytes(
+                            user.phone_number,
+                            pdf_bytes,
+                            filename=filename,
+                            caption=f"📄 Receipt #{filename.replace('.pdf', '')} - {tmpl.business_display_name}",
+                        )
+                        await self.ledger.record_outbound_message(
+                            db, business.id, user.phone_number, f"[Sent document {filename}]", send_res, user_id=user.id
+                        )
+                        auto_receipt_msg = f" I have also generated and sent your updated receipt '{filename}' with your new details to your WhatsApp!"
+                    except Exception as e:
+                        logger.warning("Could not auto-generate receipt in update_receipt_template: %s", e)
+
                 return (
-                    f"Success: Receipt template updated! Stored branding for '{tmpl.business_display_name}' has been refreshed.",
+                    f"Success: Receipt template updated! Stored branding for '{tmpl.business_display_name}' has been refreshed.{auto_receipt_msg}",
                     False,
                 )
 
             elif tool_name == "generate_receipt":
                 from app.services.receipt_service import ReceiptService
-                receipt_svc = ReceiptService()
-                tmpl = await receipt_svc.get_template(db, business.id)
-                if not tmpl:
+                from app.models.receipt_template import ReceiptTemplate
+
+                # Lazily check if business has configured receipt template
+                tmpl_stmt = select(ReceiptTemplate).where(ReceiptTemplate.business_id == business.id)
+                tmpl_res = await db.execute(tmpl_stmt)
+                existing_tmpl = tmpl_res.scalar_one_or_none()
+                if not existing_tmpl:
                     return (
                         "Notice: No receipt template found for this business. "
-                        "Before generating their first receipt/invoice, ask the user conversationally "
-                        "for their business details (Business Name, store/office address, and contact phone number, "
-                        "plus optional email or payment terms) so we can brand all their receipts professionally. "
-                        "Once they reply, save it with set_receipt_template and then generate the receipt.",
+                        "Before generating the receipt, ask the user conversationally for their business details "
+                        "(business display name, address, phone number, and optional logo or footer note) "
+                        "so it can be saved with set_receipt_template and included on their official PDF receipts.",
                         False,
                     )
+
+                receipt_svc = ReceiptService()
                 tx_id_str = tool_args.get("transaction_id")
                 target_tx_id = UUID(tx_id_str) if tx_id_str else None
+                scoped_mem_id = actor.member_id if (actor and actor.role == "staff") else None
                 try:
                     pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
-                        db, business_id=business.id, transaction_id=target_tx_id
+                        db, business_id=business.id, transaction_id=target_tx_id, member_id=scoped_mem_id
                     )
                     caption = f"📄 {'Invoice' if tx.is_credit else 'Receipt'} #{filename.replace('.pdf', '')}"
                     send_res = await self.whatsapp.send_document_bytes(
@@ -868,7 +1215,18 @@ class AgentService:
                 draft = await debt_svc.draft_payment_reminder(db, business.id, customer_name=cust_name)
                 return draft, False
 
+            elif tool_name == "get_team_performance":
+                if actor and actor.role == "staff":
+                    return "Error: Team performance analytics are restricted to the business owner.", False
+                period = tool_args.get("period") or "this_week"
+                res = await self.analytics.get_team_sales_breakdown(
+                    db, business_id=business.id, period=period
+                )
+                return res["summary_text"], False
+
             elif tool_name == "get_margin_report":
+                if actor and actor.role == "staff":
+                    return "Error: Profit margin reports and cost audits are restricted to the business owner.", False
                 period = tool_args.get("period") or "this_month"
                 item_name = tool_args.get("item_name")
                 res = await self.analytics.get_margin_report(
@@ -877,6 +1235,8 @@ class AgentService:
                 return res["summary_text"], False
 
             elif tool_name == "get_product_performance_analysis":
+                if actor and actor.role == "staff":
+                    return "Error: Product performance and dead stock analyses are restricted to the business owner.", False
                 period = tool_args.get("period") or "this_month"
                 res = await self.analytics.get_product_performance_analysis(
                     db, business_id=business.id, period=period
@@ -884,6 +1244,8 @@ class AgentService:
                 return res["summary_text"], False
 
             elif tool_name == "simulate_pricing":
+                if actor and actor.role == "staff":
+                    return "Error: Pricing simulations and margin targets are restricted to the business owner.", False
                 item_name = tool_args.get("item_name")
                 if not item_name:
                     return "Error: item_name is required.", False
@@ -901,6 +1263,8 @@ class AgentService:
                 return res["summary_text"], False
 
             elif tool_name == "log_upcoming_payable":
+                if actor and actor.role == "staff":
+                    return "Error: Logging upcoming supplier payables is restricted to the business owner.", False
                 amount = tool_args.get("amount")
                 if not amount or float(amount) <= 0:
                     return "Error: amount is required and must be greater than zero.", False
@@ -920,6 +1284,8 @@ class AgentService:
                 return msg, False
 
             elif tool_name == "get_cash_flow_forecast":
+                if actor and actor.role == "staff":
+                    return "Error: Cash flow forecasting is restricted to the business owner.", False
                 trailing_days = int(tool_args.get("trailing_days") or 30)
                 horizon_days = int(tool_args.get("horizon_days") or 14)
                 forecast = await self.analytics.get_cash_flow_forecast(
@@ -933,9 +1299,20 @@ class AgentService:
             elif tool_name == "generate_report":
                 cadence = tool_args.get("cadence") or "weekly"
                 await self.unified_reports.generate_and_deliver_report(
-                    db, user_id=user.id, cadence=cadence
+                    db, user_id=user.id, cadence=cadence, actor=actor
                 )
                 return f"Success: {cadence.title()} report generated and sent to user's WhatsApp.", False
+
+            elif tool_name == "generate_financial_chart":
+                period = (tool_args.get("period") or "monthly").lower()
+                result = await self.unified_reports.deliver_financial_chart(
+                    db, user_id=user.id, period=period, actor=actor
+                )
+                if result.get("status") == "sent":
+                    return f"Success: {period.title()} financial trend chart and interactive dashboard link generated and sent to user's WhatsApp.", False
+                else:
+                    err_msg = result.get("message", "Could not generate financial chart.")
+                    return f"Error: {err_msg}", False
 
             elif tool_name == "get_historical_summary":
                 start_str = (tool_args.get("start_date") or "").strip()
@@ -971,13 +1348,47 @@ class AgentService:
                     Transaction.occurred_at >= start_dt,
                     Transaction.occurred_at <= end_dt,
                 )
+                # Scope staff strictly to their own recorded entries
+                if actor and actor.role == "staff":
+                    tx_stmt = tx_stmt.where(Transaction.created_by_member_id == actor.member_id)
+
                 if filter_type in {"sale", "expense"}:
                     tx_stmt = tx_stmt.where(Transaction.transaction_type == filter_type)
                 tx_stmt = tx_stmt.order_by(Transaction.occurred_at.asc())
 
                 tx_rows = (await db.execute(tx_stmt)).scalars().all()
 
-                # Query user activities
+                date_label = f"{start_date_obj}" if start_date_obj == end_date_obj else f"{start_date_obj} to {end_date_obj}"
+
+                # Staff personal summary
+                if actor and actor.role == "staff":
+                    total_sales = sum((t.amount or Decimal("0")) for t in tx_rows if t.transaction_type == "sale")
+                    sales_count = sum(1 for t in tx_rows if t.transaction_type == "sale")
+                    total_expenses = sum((t.amount or Decimal("0")) for t in tx_rows if t.transaction_type == "expense")
+                    expenses_count = sum(1 for t in tx_rows if t.transaction_type == "expense")
+
+                    tx_samples = []
+                    for t in tx_rows[:15]:
+                        d_str = t.occurred_at.strftime("%Y-%m-%d")
+                        item = t.item_name or t.description or "item"
+                        tx_samples.append(f"- {d_str}: {t.transaction_type.upper()} ₦{t.amount:,.2f} ({item})")
+
+                    lines = [
+                        f"Personal Historical Summary for period [{date_label}]:",
+                        f"- Total Confirmed Records Logged by You: {len(tx_rows)}",
+                        f"- Total Sales Logged: ₦{total_sales:,.2f} ({sales_count} sales)",
+                    ]
+                    if expenses_count > 0:
+                        lines.append(f"- Total Expenses Logged by You: ₦{total_expenses:,.2f} ({expenses_count} expenses)")
+                    if tx_samples:
+                        lines.append("\nYour Transactions:")
+                        lines.extend(tx_samples)
+                        if len(tx_rows) > 15:
+                            lines.append(f"... and {len(tx_rows) - 15} more transactions.")
+
+                    return "\n".join(lines), False
+
+                # Owner business-wide summary
                 act_stmt = select(Activity).where(
                     Activity.business_id == business.id,
                     Activity.occurred_at >= start_dt,
@@ -1002,7 +1413,6 @@ class AgentService:
                     d_str = a.occurred_at.strftime("%Y-%m-%d")
                     act_samples.append(f"- {d_str}: {a.title}")
 
-                date_label = f"{start_date_obj}" if start_date_obj == end_date_obj else f"{start_date_obj} to {end_date_obj}"
                 lines = [
                     f"Historical Summary for period [{date_label}]:",
                     f"- Total Confirmed Records: {len(tx_rows)}",
@@ -1048,6 +1458,8 @@ class AgentService:
                         user_id=user.id,
                         title=title,
                         target_value=target_val_dec,
+                        business_id=business.id,
+                        created_by_member_id=actor.member_id if actor else None,
                     )
                     return f"Success: Created goal '{goal.title}'.", False
                 elif action == "list":
@@ -1065,6 +1477,9 @@ class AgentService:
                     return "Pending Confirmation: Data deletion NOT executed. Inform the user that they must reply with 'CONFIRM DELETE' to proceed with irreversible erasure.", False
 
             elif tool_name == "generate_image":
+                if not settings.enable_image_generation:
+                    return "Notice: Image generation is currently disabled. Tell the user: 'I can't generate images right now.'", False
+
                 prompt = (tool_args.get("prompt") or "").strip()
                 if not prompt:
                     return "Error: Image prompt cannot be empty.", False
@@ -1089,6 +1504,9 @@ class AgentService:
                     return f"Error generating image: {str(exc)}", False
 
             elif tool_name == "edit_image":
+                if not settings.enable_image_generation:
+                    return "Notice: Image generation is currently disabled. Tell the user: 'I can't generate images right now.'", False
+
                 instruction = (tool_args.get("instruction") or "").strip()
                 if not instruction:
                     return "Error: Image edit instruction cannot be empty.", False
@@ -1145,6 +1563,147 @@ class AgentService:
                     query, db=db, business_id=business.id
                 )
                 return info_text, False
+            elif tool_name == "invite_staff_member":
+                name = (tool_args.get("display_name") or "").strip()
+                phone = (tool_args.get("phone_number") or "").strip()
+                if not name or not phone:
+                    return "Error: Both staff member name and phone number are required.", False
+
+                if not actor:
+                    actor = ActorContext(
+                        business_id=business.id,
+                        member_id=user.id,
+                        role=user.role or "owner",
+                        wa_id=user.phone_number,
+                        display_name=user.display_name,
+                    )
+
+                res = await self.staff.invite_staff_member(
+                    db=db,
+                    business=business,
+                    actor=actor,
+                    display_name=name,
+                    phone_number=phone,
+                    whatsapp=self.whatsapp,
+                )
+                if res.get("success"):
+                    return res.get("message", "Staff invitation sent successfully."), False
+                else:
+                    return f"Error: {res.get('error', 'Could not invite staff member.')}", False
+
+            elif tool_name == "list_staff_members":
+                if not actor:
+                    actor = ActorContext(
+                        business_id=business.id,
+                        member_id=user.id,
+                        role=user.role or "owner",
+                        wa_id=user.phone_number,
+                        display_name=user.display_name,
+                    )
+
+                res = await self.staff.list_staff_members(
+                    db=db,
+                    business=business,
+                    actor=actor,
+                )
+                if res.get("success"):
+                    return res.get("formatted_text", "No team members found."), False
+                else:
+                    return f"Error: {res.get('error', 'Could not list team members.')}", False
+
+            elif tool_name == "remove_staff_member":
+                identifier = (tool_args.get("identifier") or "").strip()
+                if not identifier:
+                    return "Error: Staff member name or phone number is required.", False
+
+                if not actor:
+                    actor = ActorContext(
+                        business_id=business.id,
+                        member_id=user.id,
+                        role=user.role or "owner",
+                        wa_id=user.phone_number,
+                        display_name=user.display_name,
+                    )
+
+                res = await self.staff.remove_staff_member(
+                    db=db,
+                    business=business,
+                    actor=actor,
+                    identifier=identifier,
+                    whatsapp=self.whatsapp,
+                )
+                if res.get("success"):
+                    return res.get("message", "Staff member removed successfully."), False
+                else:
+                    return f"Error: {res.get('error', 'Could not remove staff member.')}", False
+
+            elif tool_name == "void_transaction":
+                reason = (tool_args.get("reason") or "User requested void").strip()
+                identifier = tool_args.get("identifier")
+                target_tx_id = None
+                if identifier:
+                    try:
+                        target_tx_id = UUID(identifier)
+                    except Exception:
+                        target_tx_id = None
+
+                if not actor:
+                    actor = ActorContext(
+                        business_id=business.id,
+                        member_id=user.id,
+                        role=user.role or "owner",
+                        wa_id=user.phone_number,
+                        display_name=user.display_name,
+                    )
+
+                res = await self.ledger.void_transaction(
+                    db=db,
+                    business_id=business.id,
+                    actor=actor,
+                    transaction_id=target_tx_id,
+                    reason=reason,
+                )
+                if not res.get("success"):
+                    return f"Error: {res.get('error', 'Could not void transaction.')}", False
+
+                # If staff voided, alert the owner
+                if res.get("notify_owner") and business.phone_number and actor.wa_id != business.phone_number:
+                    owner_alert = res.get("owner_alert_message")
+                    if owner_alert:
+                        try:
+                            await self.whatsapp.send_text(business.phone_number, owner_alert)
+                            await self.ledger.record_outbound_message(
+                                db, business.id, business.phone_number, owner_alert, {"status": "sent"}
+                            )
+                        except Exception as n_err:
+                            logger.warning("Could not dispatch void alert to owner: %s", n_err)
+
+                return res.get("message", "Transaction voided successfully."), False
+
+            elif tool_name == "set_expense_approval_threshold":
+                thresh_amount = tool_args.get("threshold_amount")
+                if thresh_amount is None:
+                    return "Error: threshold_amount is required.", False
+
+                if not actor:
+                    actor = ActorContext(
+                        business_id=business.id,
+                        member_id=user.id,
+                        role=user.role or "owner",
+                        wa_id=user.phone_number,
+                        display_name=user.display_name,
+                    )
+
+                res = await self.ledger.set_expense_approval_threshold(
+                    db=db,
+                    business_id=business.id,
+                    actor=actor,
+                    threshold_amount=Decimal(str(thresh_amount)),
+                )
+                if res.get("success"):
+                    return res.get("message", "Expense approval threshold updated."), False
+                else:
+                    return f"Error: {res.get('error', 'Could not set expense threshold.')}", False
 
             else:
                 return f"Error: Unknown tool '{tool_name}'.", False
@@ -1160,15 +1719,76 @@ class AgentService:
         user: User,
         user_message: str,
         inbound_message_id: UUID | None = None,
+        actor: ActorContext | None = None,
+        source_wamid: str | None = None,
     ) -> str:
         """
         Graceful offline fallback for unit tests or temporary LLM outage.
         Preserves backward compatibility with legacy intent routing.
         """
-        intent = IntentRouter.classify(user_message)
         business_tz = getattr(business, "timezone", None) or settings.local_timezone
+        # Team management commands in offline fallback
+        lower_msg = user_message.lower().strip()
+        if re.search(r"\b(?:list\s+staff|my\s+team|team\s+members|view\s+staff|show\s+staff)\b", lower_msg):
+            act = actor or ActorContext(
+                business_id=business.id,
+                member_id=user.id,
+                role=user.role or "owner",
+                wa_id=user.phone_number,
+                display_name=user.display_name,
+            )
+            res = await self.staff.list_staff_members(db, business, act)
+            return res.get("formatted_text") or res.get("error", "No team members found.")
+
+        m_invite = re.search(r"\b(?:invite\s+staff|add\s+staff)\s+([A-Za-z\s]+?)\s+(\+?\d[\d\s\-]{7,15})\b", user_message, re.IGNORECASE)
+        if m_invite:
+            staff_name = m_invite.group(1).strip()
+            staff_phone = m_invite.group(2).strip()
+            act = actor or ActorContext(
+                business_id=business.id,
+                member_id=user.id,
+                role=user.role or "owner",
+                wa_id=user.phone_number,
+                display_name=user.display_name,
+            )
+            res = await self.staff.invite_staff_member(
+                db=db,
+                business=business,
+                actor=act,
+                display_name=staff_name,
+                phone_number=staff_phone,
+                whatsapp=self.whatsapp,
+            )
+            return res.get("message") or res.get("error", "Failed to invite staff member.")
+
+        m_remove = re.search(r"\b(?:remove\s+staff|delete\s+staff)\s+(.+)\b", user_message, re.IGNORECASE)
+        if m_remove:
+            target_id = m_remove.group(1).strip()
+            act = actor or ActorContext(
+                business_id=business.id,
+                member_id=user.id,
+                role=user.role or "owner",
+                wa_id=user.phone_number,
+                display_name=user.display_name,
+            )
+            res = await self.staff.remove_staff_member(
+                db=db,
+                business=business,
+                actor=act,
+                identifier=target_id,
+                whatsapp=self.whatsapp,
+            )
+            return res.get("message") or res.get("error", "Failed to remove staff member.")
+
+        m_team = re.search(r"\b(?:team sales|staff sales|team performance|staff performance|team breakdown)\b", user_message, re.IGNORECASE)
+        if m_team:
+            if actor and actor.role == "staff":
+                return "Error: Team performance analytics are restricted to the business owner."
+            res = await self.analytics.get_team_sales_breakdown(db, business.id, period="this_week")
+            return res["summary_text"]
 
         # 1. Privacy / Forget-me intent
+        intent = IntentRouter.classify(user_message)
         if intent == "forget_me":
             if user_message.strip().upper() == "CONFIRM DELETE":
                 await self.memory.purge_user_data(db, user.id)
@@ -1199,7 +1819,11 @@ class AgentService:
                 flags=re.IGNORECASE,
             ).strip()
             await self.goals.create_goal(
-                db, user.id, title=clean_title or user_message, business_id=business.id
+                db,
+                user.id,
+                title=clean_title or user_message,
+                business_id=business.id,
+                created_by_member_id=actor.member_id if actor else None,
             )
             return f"🎯 Goal recorded: '{clean_title or user_message}'. I will track your progress and include it in your roadmaps!"
 
@@ -1213,22 +1837,37 @@ class AgentService:
                     user_message,
                     flags=re.IGNORECASE,
                 ).strip() or "Follow-up task"
-                task = await self.tasks.create_task(db, business_id=business.id, title=clean_title, due_at=due_at_utc, user_id=user.id)
+                task = await self.tasks.create_task(
+                    db,
+                    business_id=business.id,
+                    title=clean_title,
+                    due_at=due_at_utc,
+                    user_id=user.id,
+                    created_by_member_id=actor.member_id if actor else None,
+                )
                 formatted_time = format_confirmation_time(due_at_utc, business_tz)
                 return f"Got it — I'll remind you on {formatted_time} for '{task.title}'."
             else:
-                await self.tasks.create_task(db, business_id=business.id, title=user_message, due_at=None, user_id=user.id)
+                await self.tasks.create_task(
+                    db,
+                    business_id=business.id,
+                    title=user_message,
+                    due_at=None,
+                    user_id=user.id,
+                    created_by_member_id=actor.member_id if actor else None,
+                )
                 return "What time should I remind you? (e.g. 'tomorrow at 3pm', 'in 2 hours', or 'next Monday by 10am')"
 
         # 5. Periodic Report intent
         if intent == "report":
-            await self.unified_reports.generate_and_deliver_report(db, user.id, cadence="weekly")
+            await self.unified_reports.generate_and_deliver_report(db, user.id, cadence="weekly", actor=actor)
             return "I have generated and sent your weekly summary report."
 
         # 6. General Q&A intent
         if intent == "general_qa":
             try:
-                return await self.qa.answer(db, user, user_message)
+                ans = await self.qa.answer(db, user, user_message)
+                return self._maybe_append_advisory_disclaimer(user_message, ans)
             except Exception as qa_exc:
                 logger.error("QA execution failed: %s", qa_exc, exc_info=True)
                 return "I had a brief hiccup retrieving that. Could you ask again or rephrase what you need?"
@@ -1275,7 +1914,13 @@ class AgentService:
             estimated_cost_usd=getattr(self.extractor, "last_estimated_cost_usd", Decimal("0.00")),
         )
         confirmation = await self.ledger.stage_record_for_confirmation(
-            db, business.id, inbound_message_id or business.id, extraction, record
+            db,
+            business.id,
+            inbound_message_id or business.id,
+            extraction,
+            record,
+            member_id=actor.member_id if actor else None,
+            source_wamid=source_wamid,
         )
         conf_text = confirmation.confirmation_text or build_confirmation_text(record)
         send_result = await self.whatsapp.send_confirmation(user.phone_number, conf_text)

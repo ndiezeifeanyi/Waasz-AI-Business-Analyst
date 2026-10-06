@@ -290,9 +290,9 @@ async def test_regression_sale_without_amount_prompts_clarification():
         body=text,
     )
     mock_db = AsyncMock()
-    mock_result_none = MagicMock()
-    mock_result_none.scalar_one_or_none.return_value = None
-    mock_db.execute.return_value = mock_result_none
+    mock_result_user = MagicMock()
+    mock_result_user.scalar_one_or_none.return_value = user
+    mock_db.execute.return_value = mock_result_user
 
     await processor.process_message(mock_db, parsed1, None)
 

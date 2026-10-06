@@ -26,6 +26,10 @@ class Debt(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
     currency: Mapped[str] = mapped_column(String(8), default="NGN")
     status: Mapped[str] = mapped_column(String(32), default="outstanding", index=True)  # 'outstanding', 'paid'
+    created_by_member_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("members.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_wamid: Mapped[str | None] = mapped_column(String(160), nullable=True)
     due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -96,13 +96,50 @@ class ReportService:
         totals["inventory_changes_count"] = inventory_changes_count
 
         title = "Today Summary" if report_type == "daily" else "This Week Summary"
+        sales_detail = f"Sales: {format_naira(totals['sales'])}"
+        if totals.get("revenue_uncollected", Decimal("0")) > Decimal("0"):
+            sales_detail += (
+                f" (Cash: {format_naira(totals['cash_collected'])} | "
+                f"Credit/Receivables: {format_naira(totals['revenue_uncollected'])})"
+            )
+        overdue_section = ""
+        if report_type == "weekly":
+            from app.services.debt_service import DebtService
+            debt_svc = DebtService()
+            all_debts = await debt_svc.list_outstanding_debts(db, business_id=business_id)
+            overdue_debts = [d for d in all_debts if d.get("is_overdue")]
+            if overdue_debts:
+                total_overdue = sum((d["amount"] for d in overdue_debts), Decimal("0"))
+                overdue_lines = [
+                    f"\n⚠️ Overdue Receivables Alert ({format_naira(total_overdue)}):"
+                ]
+                for od in overdue_debts[:3]:
+                    overdue_lines.append(f"• {od['customer_name']}: {format_naira(od['amount'])} ({od['days_overdue']}d overdue)")
+                if len(overdue_debts) > 3:
+                    overdue_lines.append(f"• ... and {len(overdue_debts) - 3} more")
+                overdue_lines.append("Tip: Reply 'draft reminder for [name]' to prepare a message.")
+                overdue_section = "\n" + "\n".join(overdue_lines)
+
+        margin_section = ""
+        try:
+            from app.services.analytics_service import AnalyticsService
+            analytics_svc = AnalyticsService()
+            period_str = "today" if report_type == "daily" else "weekly"
+            margin_res = await analytics_svc.get_margin_report(db, business_id, period=period_str)
+            if margin_res.get("overall_margin_pct") is not None:
+                margin_section = f"\nGross margin: {margin_res['overall_margin_pct']}% (COGS: {format_naira(margin_res['total_cogs'])})"
+        except Exception:
+            pass
+
         body = (
             f"{title}\n"
-            f"Sales: {format_naira(totals['sales'])}\n"
+            f"{sales_detail}\n"
             f"Expenses: {format_naira(totals['expenses'])}\n"
-            f"Estimated profit: {format_naira(totals['profit'])}\n"
+            f"Estimated profit: {format_naira(totals['profit'])}"
+            f"{margin_section}\n"
             f"Confirmed records: {totals['records_count']}\n"
             f"Stock updates: {inventory_changes_count}"
+            f"{overdue_section}"
         )
         return body, totals
 
@@ -112,6 +149,20 @@ class ReportService:
         statement: Select = select(
             func.coalesce(
                 func.sum(Transaction.amount).filter(Transaction.transaction_type == "sale"),
+                0,
+            ),
+            func.coalesce(
+                func.sum(Transaction.amount).filter(
+                    Transaction.transaction_type == "sale",
+                    Transaction.is_credit.is_(False),
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(Transaction.amount).filter(
+                    Transaction.transaction_type == "sale",
+                    Transaction.is_credit.is_(True),
+                ),
                 0,
             ),
             func.coalesce(
@@ -127,12 +178,16 @@ class ReportService:
         )
         row = (await db.execute(statement)).one()
         sales = Decimal(row[0] or 0)
-        expenses = Decimal(row[1] or 0)
+        cash_sales = Decimal(row[1] or 0)
+        credit_sales = Decimal(row[2] or 0)
+        expenses = Decimal(row[3] or 0)
         return {
             "sales": sales,
+            "cash_collected": cash_sales,
+            "revenue_uncollected": credit_sales,
             "expenses": expenses,
             "profit": sales - expenses,
-            "records_count": int(row[2] or 0),
+            "records_count": int(row[4] or 0),
         }
 
     async def _inventory_changes_count(

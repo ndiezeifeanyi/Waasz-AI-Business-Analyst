@@ -762,3 +762,191 @@ class AnalyticsService:
             "summary_text": "\n".join(lines),
         }
 
+    async def get_team_sales_breakdown(
+        self,
+        db: AsyncSession,
+        business_id: UUID,
+        period: str = "this_month",
+    ) -> dict[str, Any]:
+        """
+        Aggregate confirmed sales by team member for the owner.
+        """
+        from app.models.member import Member
+
+        start_dt, end_dt, label = self._resolve_period_bounds(period)
+
+        # 1. Fetch active members for the business
+        members_stmt = select(Member).where(Member.business_id == business_id)
+        members = (await db.execute(members_stmt)).scalars().all()
+        member_map = {m.id: m.display_name for m in members}
+
+        # 2. Fetch all confirmed sales in the period
+        sales_stmt = select(Transaction).where(
+            Transaction.business_id == business_id,
+            Transaction.transaction_type == "sale",
+            Transaction.status == "confirmed",
+            Transaction.occurred_at >= start_dt,
+            Transaction.occurred_at <= end_dt,
+        )
+        sales = (await db.execute(sales_stmt)).scalars().all()
+
+        total_sales = sum((s.amount or Decimal("0") for s in sales), Decimal("0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        total_count = len(sales)
+
+        # 3. Group by member
+        stats_by_member: dict[UUID | None, dict[str, Any]] = {}
+        for s in sales:
+            m_id = s.created_by_member_id
+            if m_id not in stats_by_member:
+                name = member_map.get(m_id, "Direct / Owner" if m_id is None else "Former Staff")
+                stats_by_member[m_id] = {
+                    "name": name,
+                    "total": Decimal("0"),
+                    "count": 0,
+                }
+            stats_by_member[m_id]["total"] += (s.amount or Decimal("0"))
+            stats_by_member[m_id]["count"] += 1
+
+        sorted_members = sorted(stats_by_member.values(), key=lambda x: x["total"], reverse=True)
+
+        top_contributor = None
+        for m_data in sorted_members:
+            if m_data["name"] != "Direct / Owner":
+                top_contributor = m_data["name"]
+                break
+        if not top_contributor and sorted_members:
+            top_contributor = sorted_members[0]["name"]
+
+        lines = [
+            f"👥 Team Sales Breakdown ({label}):",
+            f"• Total Business Sales: {format_naira(total_sales)} ({total_count} transactions)",
+        ]
+
+        if sorted_members:
+            lines.append("\nSales by Team Member:")
+            for m_data in sorted_members:
+                avg = (m_data["total"] / m_data["count"]).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if m_data["count"] else Decimal("0")
+                lines.append(f"• {m_data['name']}: {format_naira(m_data['total'])} ({m_data['count']} sales, avg {format_naira(avg)})")
+            if top_contributor:
+                lines.append(f"\n🏆 Top Contributor: {top_contributor}")
+        else:
+            lines.append("• No sales recorded during this period.")
+
+        return {
+            "period_label": label,
+            "total_sales": total_sales,
+            "total_count": total_count,
+            "members": sorted_members,
+            "top_contributor": top_contributor,
+            "summary_text": "\n".join(lines),
+        }
+
+    async def get_staff_personal_summary(
+        self,
+        db: AsyncSession,
+        business_id: UUID,
+        member_id: UUID,
+        member_name: str,
+        period: str = "this_week",
+    ) -> dict[str, Any]:
+        """
+        Aggregate isolated performance metrics for a specific staff member.
+        Only computes their own recorded entries. Never leaks business-wide expenses or margins.
+        """
+        start_dt, end_dt, label = self._resolve_period_bounds(period)
+        period_duration = end_dt - start_dt
+        prior_start_dt = start_dt - period_duration
+
+        # 1. Current period sales for this member
+        curr_stmt = select(Transaction).where(
+            Transaction.business_id == business_id,
+            Transaction.created_by_member_id == member_id,
+            Transaction.transaction_type == "sale",
+            Transaction.status == "confirmed",
+            Transaction.occurred_at >= start_dt,
+            Transaction.occurred_at <= end_dt,
+        )
+        curr_sales = (await db.execute(curr_stmt)).scalars().all()
+
+        curr_total = sum((s.amount or Decimal("0") for s in curr_sales), Decimal("0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        curr_count = len(curr_sales)
+        avg_sale = (curr_total / curr_count).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if curr_count else Decimal("0")
+
+        # 2. Prior period sales for this member
+        prior_stmt = select(Transaction).where(
+            Transaction.business_id == business_id,
+            Transaction.created_by_member_id == member_id,
+            Transaction.transaction_type == "sale",
+            Transaction.status == "confirmed",
+            Transaction.occurred_at >= prior_start_dt,
+            Transaction.occurred_at < start_dt,
+        )
+        prior_sales = (await db.execute(prior_stmt)).scalars().all()
+        prior_total = sum((s.amount or Decimal("0") for s in prior_sales), Decimal("0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        prior_count = len(prior_sales)
+
+        # 3. Top item and highest single transaction
+        item_counts: dict[str, int] = {}
+        item_amounts: dict[str, Decimal] = {}
+        best_sale = Decimal("0")
+        for s in curr_sales:
+            amt = s.amount or Decimal("0")
+            if amt > best_sale:
+                best_sale = amt
+            item = s.item_name or "Item"
+            qty = int(s.quantity or 1)
+            item_counts[item] = item_counts.get(item, 0) + qty
+            item_amounts[item] = item_amounts.get(item, Decimal("0")) + amt
+
+        top_item_name = None
+        top_item_qty = 0
+        if item_counts:
+            top_item_name = max(item_counts, key=item_counts.get)
+            top_item_qty = item_counts[top_item_name]
+
+        growth_diff = curr_total - prior_total
+        growth_pct = round(float((growth_diff / prior_total) * 100), 1) if prior_total > Decimal("0") else None
+
+        lines = [
+            f"👤 Personal Staff Performance Report - {member_name}",
+            f"Period: {label}",
+            f"\n📊 Your Sales Highlights:",
+            f"• Total Sales Logged: {format_naira(curr_total)}",
+            f"• Completed Sales: {curr_count} transactions",
+            f"• Average Sale Value: {format_naira(avg_sale)}",
+        ]
+        if top_item_name:
+            lines.append(f"• Top Selling Item: {top_item_name} ({top_item_qty} sold, {format_naira(item_amounts.get(top_item_name, Decimal('0')))})")
+        if best_sale > Decimal("0"):
+            lines.append(f"• Largest Single Sale: {format_naira(best_sale)}")
+
+        lines.append(f"\n📈 Comparison vs Prior Period:")
+        if prior_count == 0 and curr_count > 0:
+            lines.append(f"• Outstanding start! You logged your first {curr_count} sales this period.")
+        elif growth_pct is not None:
+            sign = "+" if growth_diff >= Decimal("0") else ""
+            lines.append(f"• {sign}{format_naira(growth_diff)} ({sign}{growth_pct}%) compared to prior period ({prior_count} sales).")
+        else:
+            lines.append(f"• Prior period: {format_naira(prior_total)} across {prior_count} transactions.")
+
+        lines.append(f"\n💡 Tips to Keep Improving:")
+        if curr_count > 0:
+            lines.append("• Promptly log transactions immediately after payment to keep stock accurate.")
+            lines.append("• Recommend complementary products to increase your average sale value.")
+        else:
+            lines.append("• Start logging your sales as soon as customer transactions occur today!")
+
+        return {
+            "period_label": label,
+            "member_name": member_name,
+            "total_sales": curr_total,
+            "total_count": curr_count,
+            "avg_sale": avg_sale,
+            "top_item": top_item_name,
+            "best_sale": best_sale,
+            "prior_total": prior_total,
+            "prior_count": prior_count,
+            "growth_pct": growth_pct,
+            "summary_text": "\n".join(lines),
+        }
+

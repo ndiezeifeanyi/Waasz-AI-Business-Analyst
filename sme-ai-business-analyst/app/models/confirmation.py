@@ -16,6 +16,9 @@ class Confirmation(Base):
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     business_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("businesses.id"))
+    member_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("members.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     ai_extraction_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("ai_extractions.id"), unique=True
     )

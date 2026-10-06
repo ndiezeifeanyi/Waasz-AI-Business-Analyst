@@ -3,6 +3,6 @@ revision = 3
 requires-python = ">=3.12, <3.14"
 
 [[package]]
-name = "sme-ai-business-analyst"
+name = "waasz-ai"
 version = "0.1.0"
 source = { virtual = "." }

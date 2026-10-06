@@ -22,6 +22,8 @@ class MagicLinkService:
         )
         db.add(link)
         await db.flush()
+        if hasattr(db, "commit"):
+            await db.commit()
         return token
 
     async def validate_token(self, db: AsyncSession, token: str) -> UUID | None:

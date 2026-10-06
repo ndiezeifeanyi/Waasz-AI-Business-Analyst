@@ -11,44 +11,50 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import select
-from app.core.database import async_session_factory
-from app.models.user import User
+import os
+import psycopg
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
-async def export():
-    async with async_session_factory() as session:
-        users = (await session.execute(select(User).order_by(User.created_at.asc()))).scalars().all()
+def _get_db_url() -> str:
+    url = os.getenv("SYNC_DATABASE_URL") or os.getenv("DATABASE_URL", "")
+    return url.replace("postgresql+asyncpg://", "postgresql://")
 
-        root = Path(__file__).resolve().parent.parent
-        csv_path = root / "users_table.csv"
-        md_path = root / "users_table.md"
+
+def export():
+    """Synchronous export of users table using psycopg."""
+    url = _get_db_url()
+    if not url:
+        return
+
+    root = Path(__file__).resolve().parent.parent
+    csv_path = root / "users_table.csv"
+    md_path = root / "users_table.md"
+
+    try:
+        with psycopg.connect(url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id::text, phone_number, coalesce(display_name, ''), role, coalesce(niche, ''), is_active, created_at, last_inbound_at, coalesce(business_id::text, '')
+                    FROM users
+                    ORDER BY created_at ASC
+                """)
+                users = cur.fetchall()
 
         # 1. Export CSV
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([
-                "id",
-                "phone_number",
-                "display_name",
-                "role",
-                "niche",
-                "is_active",
-                "created_at",
-                "last_inbound_at",
-                "business_id",
+                "id", "phone_number", "display_name", "role", "niche", "is_active", "created_at", "last_inbound_at", "business_id"
             ])
             for u in users:
-                role_val = getattr(u.role, "value", str(u.role))
                 writer.writerow([
-                    str(u.id),
-                    u.phone_number,
-                    u.display_name or "",
-                    role_val,
-                    u.niche or "",
-                    u.is_active,
-                    u.created_at.isoformat() if u.created_at else "",
-                    u.last_inbound_at.isoformat() if u.last_inbound_at else "",
-                    str(u.business_id) if u.business_id else "",
+                    u[0], u[1], u[2], u[3], u[4], u[5],
+                    u[6].isoformat() if u[6] else "",
+                    u[7].isoformat() if u[7] else "",
+                    u[8]
                 ])
 
         # 2. Export Markdown Table
@@ -58,13 +64,18 @@ async def export():
             f.write("| # | Phone Number | Display Name | Role | Niche | Active | Created At | User ID |\n")
             f.write("|---|---|---|---|---|---|---|---|\n")
             for i, u in enumerate(users, 1):
-                name = u.display_name if u.display_name else "-"
-                role_val = getattr(u.role, "value", str(u.role))
-                created = u.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if u.created_at else "-"
-                f.write(f"| {i} | `{u.phone_number}` | {name} | {role_val} | {u.niche} | {u.is_active} | {created} | `{u.id}` |\n")
+                name = u[2] if u[2] else "-"
+                created = u[6].strftime("%Y-%m-%d %H:%M:%S UTC") if u[6] else "-"
+                f.write(f"| {i} | `{u[1]}` | {name} | {u[3]} | {u[4]} | {u[5]} | {created} | `{u[0]}` |\n")
 
         print(f"Exported {len(users)} users successfully to {csv_path.name} and {md_path.name}")
+    except Exception as e:
+        print(f"Error exporting users: {e}")
+
+
+async def export_async():
+    export()
 
 
 if __name__ == "__main__":
-    asyncio.run(export())
+    export()
