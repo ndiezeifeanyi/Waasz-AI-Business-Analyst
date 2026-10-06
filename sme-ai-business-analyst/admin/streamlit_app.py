@@ -15,7 +15,13 @@ from dotenv import load_dotenv
 st.set_page_config(page_title="SME AI Founder Dashboard", layout="wide")
 load_dotenv(ROOT_DIR / ".env", override=True)
 
-from admin.auth_manager import require_admin_auth
+from admin.auth_manager import (
+    require_admin_auth,
+    format_duration,
+    auth_manager,
+    get_live_base_url,
+    set_live_base_url,
+)
 
 # Security Gatekeeper: Enforce cryptographic login, weekly expiration, and lockout shield
 admin_session = require_admin_auth()
@@ -76,6 +82,9 @@ businesses = query_df(
 
 selected_business_id = None
 with st.sidebar:
+    logo_file = Path(__file__).resolve().parent / "waasz_logo.jpg"
+    if logo_file.exists():
+        st.image(str(logo_file), width=90)
     st.header("⚡ System Health Pulse")
     
     # 1. DB Ping
@@ -1246,10 +1255,10 @@ with tab_security:
     st.markdown("#### 🛡️ Active Administrative Session Status")
     st.markdown(
         f"- **Authenticated Identity:** `{admin_session.get('sub', 'admin')}`\n"
-        f"- **Session Policy:** 7-Day Cryptographic Rotating Window (Weekly Reset)\n"
+        f"- **Session Policy:** 7-Day Cryptographic Window\n"
         f"- **Time Remaining in Session:** `{format_duration(admin_session.get('remaining_seconds', 0))}`\n"
         f"- **Signature Algorithm:** `HMAC-SHA256 (JWT)`\n"
-        f"- **Anti-Brute-Force Rate Limiting:** Active (Max 5 attempts / 15m lockout)"
+        f"- **Anti-Brute-Force Rate Limiting:** Active (Max 5 attempts / 60s cooldown)"
     )
 
 
