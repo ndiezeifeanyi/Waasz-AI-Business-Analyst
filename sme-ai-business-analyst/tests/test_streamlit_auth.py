@@ -27,33 +27,30 @@ def test_no_credentials_by_default(auth_mgr):
 
 
 def test_verify_admin_credentials_success(auth_mgr):
-    with patch.object(settings, "admin_dashboard_username", "my_custom_user"):
-        with patch.object(settings, "admin_dashboard_password", "MyCustomSecretPass123#"):
-            assert auth_mgr.has_configured_credentials() is True
-            assert auth_mgr.verify_credentials("my_custom_user", "MyCustomSecretPass123#") is True
+    with patch.object(auth_mgr, "get_configured_credentials", return_value=("my_custom_user", "MyCustomSecretPass123#", False)):
+        assert auth_mgr.has_configured_credentials() is True
+        assert auth_mgr.verify_credentials("my_custom_user", "MyCustomSecretPass123#") is True
+        assert auth_mgr.verify_credentials("My_Custom_User", "MyCustomSecretPass123#") is True
 
 
 def test_verify_admin_credentials_invalid_password(auth_mgr):
-    with patch.object(settings, "admin_dashboard_username", "my_custom_user"):
-        with patch.object(settings, "admin_dashboard_password", "MyCustomSecretPass123#"):
-            assert auth_mgr.verify_credentials("my_custom_user", "WrongPassword123!") is False
+    with patch.object(auth_mgr, "get_configured_credentials", return_value=("my_custom_user", "MyCustomSecretPass123#", False)):
+        assert auth_mgr.verify_credentials("my_custom_user", "WrongPassword123!") is False
 
 
 def test_verify_admin_credentials_invalid_username(auth_mgr):
-    with patch.object(settings, "admin_dashboard_username", "my_custom_user"):
-        with patch.object(settings, "admin_dashboard_password", "MyCustomSecretPass123#"):
-            assert auth_mgr.verify_credentials("hacker_account", "MyCustomSecretPass123#") is False
+    with patch.object(auth_mgr, "get_configured_credentials", return_value=("my_custom_user", "MyCustomSecretPass123#", False)):
+        assert auth_mgr.verify_credentials("hacker_account", "MyCustomSecretPass123#") is False
 
 
 def test_argon2_password_hash_verification(auth_mgr):
     secret_pass = "UltraSecureSuperAdmin999!#"
     argon_hash = pwd_context.hash(secret_pass)
 
-    with patch.object(settings, "admin_dashboard_username", "secops_lead"):
-        with patch.object(settings, "admin_dashboard_password_hash", argon_hash):
-            assert auth_mgr.has_configured_credentials() is True
-            assert auth_mgr.verify_credentials("secops_lead", secret_pass) is True
-            assert auth_mgr.verify_credentials("secops_lead", "WrongGuess123") is False
+    with patch.object(auth_mgr, "get_configured_credentials", return_value=("secops_lead", argon_hash, True)):
+        assert auth_mgr.has_configured_credentials() is True
+        assert auth_mgr.verify_credentials("secops_lead", secret_pass) is True
+        assert auth_mgr.verify_credentials("secops_lead", "WrongGuess123") is False
 
 
 def test_session_token_generation_and_valid_weekly_session(auth_mgr):

@@ -43,9 +43,19 @@ pwd_context = CryptContext(
 
 # Brute-force protection constants
 MAX_FAILED_ATTEMPTS = 5
-LOCKOUT_DURATION_SECONDS = 900  # 15 minutes lockout
+LOCKOUT_DURATION_SECONDS = 60  # 1 minute lockout cooldown
 FAILED_ATTEMPTS_KEY = "_auth_failed_attempts"
 LOCKOUT_UNTIL_KEY = "_auth_lockout_until"
+
+
+def clean_val(val: str | None) -> str:
+    """Strip whitespace, quotes, and carriage returns from environment variables."""
+    if not val:
+        return ""
+    v = str(val).strip().strip("\r\n").strip()
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        v = v[1:-1].strip()
+    return v
 
 
 def database_url() -> str | None:
@@ -123,10 +133,18 @@ class AdminAuthManager:
         Fetch configured username and password/hash from database or environment.
         Returns: (username, password_or_hash, is_hashed)
         """
-        # Ensure latest environment from .env is recognized dynamically
-        env_file = ROOT_DIR / ".env"
-        if env_file.exists():
-            load_dotenv(env_file, override=True)
+        # Ensure latest environment from .env is recognized dynamically across possible project root paths
+        for candidate in [
+            ROOT_DIR / ".env",
+            ROOT_DIR.parent / ".env",
+            Path.cwd() / ".env",
+            Path.cwd() / "sme-ai-business-analyst" / ".env",
+        ]:
+            if candidate.exists():
+                try:
+                    load_dotenv(candidate, override=True)
+                except Exception:
+                    pass
 
         # 1. Check database system_settings table first (live dynamic updates)
         try:
@@ -139,20 +157,36 @@ class AdminAuthManager:
                         u = rows.get("admin_username")
                         h = rows.get("admin_password_hash")
                         if u and h:
-                            return u.strip(), h.strip(), True
+                            return clean_val(u), clean_val(h), True
         except Exception as exc:
             logger.debug("Could not read admin credentials from system_settings: %s", exc)
 
-        # 2. Check environment / Settings
-        env_user = os.getenv("ADMIN_DASHBOARD_USERNAME", "").strip() or getattr(settings, "admin_dashboard_username", "").strip()
-        env_hash = os.getenv("ADMIN_DASHBOARD_PASSWORD_HASH", "").strip() or getattr(settings, "admin_dashboard_password_hash", "").strip()
-        env_pass = os.getenv("ADMIN_DASHBOARD_PASSWORD", "").strip() or getattr(settings, "admin_dashboard_password", "").strip()
+        # 2. Check environment / Settings (supports both ADMIN_DASHBOARD_* and ADMIN_* aliases)
+        env_user = (
+            os.getenv("ADMIN_DASHBOARD_USERNAME")
+            or os.getenv("ADMIN_USERNAME")
+            or getattr(settings, "admin_dashboard_username", "")
+        )
+        env_hash = (
+            os.getenv("ADMIN_DASHBOARD_PASSWORD_HASH")
+            or os.getenv("ADMIN_PASSWORD_HASH")
+            or getattr(settings, "admin_dashboard_password_hash", "")
+        )
+        env_pass = (
+            os.getenv("ADMIN_DASHBOARD_PASSWORD")
+            or os.getenv("ADMIN_PASSWORD")
+            or getattr(settings, "admin_dashboard_password", "")
+        )
 
-        if env_user:
-            if env_hash:
-                return env_user, env_hash, True
-            if env_pass:
-                return env_user, env_pass, False
+        u_clean = clean_val(env_user)
+        h_clean = clean_val(env_hash)
+        p_clean = clean_val(env_pass)
+
+        if u_clean:
+            if h_clean:
+                return u_clean, h_clean, True
+            if p_clean:
+                return u_clean, p_clean, False
 
         return None, None, False
 
@@ -166,8 +200,8 @@ class AdminAuthManager:
         Hash password using Argon2id and persist credentials to system_settings table.
         Zero hardcoded credentials in codebase.
         """
-        username = username.strip()
-        password = password.strip()
+        username = clean_val(username)
+        password = clean_val(password)
         hashed = pwd_context.hash(password)
 
         db_url = database_url()
@@ -202,22 +236,32 @@ class AdminAuthManager:
         """
         Verify username and password against configured Argon2 hash or environment credentials.
         Strictly constant-time comparison to eliminate timing attacks.
+        Resilient against casing, surrounding quotes, carriage returns, and accidental whitespace.
         """
         expected_user, expected_secret, is_hashed = self.get_configured_credentials()
         if not expected_user or not expected_secret:
             return False
 
-        if not hmac.compare_digest(username.strip(), expected_user):
+        u_input = clean_val(username).lower()
+        exp_user = clean_val(expected_user).lower()
+        if not hmac.compare_digest(u_input, exp_user):
             return False
+
+        p_input = clean_val(password)
+        exp_sec = clean_val(expected_secret)
 
         if is_hashed:
             try:
-                return pwd_context.verify(password, expected_secret)
+                return pwd_context.verify(password, exp_sec) or pwd_context.verify(p_input, exp_sec)
             except Exception as e:
                 logger.warning("Error verifying Argon2 password hash: %s", e)
                 return False
         else:
-            return hmac.compare_digest(password, expected_secret)
+            return (
+                hmac.compare_digest(password, expected_secret)
+                or hmac.compare_digest(p_input, exp_sec)
+                or hmac.compare_digest(password.strip(), expected_secret.strip())
+            )
 
     def create_session_token(self, username: str) -> str:
         """
@@ -305,8 +349,8 @@ def render_login_screen():
             """
             <div style="text-align: center; margin-bottom: 25px;">
                 <h1 style="margin-bottom: 0;">🛡️ Waasz AI</h1>
-                <h3 style="color: #64748b; font-weight: 500; margin-top: 5px;">Executive Founder Portal</h3>
-                <p style="font-size: 0.9rem; color: #94a3b8;">Restricted Access • Argon2id Encryption • 7-Day Rotating Sessions</p>
+                <h3 style="color: #64748b; font-weight: 500; margin-top: 5px;">Founder Portal</h3>
+                <p style="font-size: 0.85rem; color: #94a3b8;">Restricted Access</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -317,17 +361,8 @@ def render_login_screen():
         if not has_creds:
             st.error(
                 "🛑 **Administrative Portal Locked**\n\n"
-                "Master administrative credentials have **not** been configured on this server.\n\n"
-                "Because this is a private executive portal, **public user registration and browser-based setup are disabled** to prevent unauthorized access.\n\n"
-                "**How to configure master access:**\n"
-                "1. Open your server's `.env` configuration file.\n"
-                "2. Define your master credentials:\n"
-                "```env\n"
-                "ADMIN_DASHBOARD_USERNAME=\"your_admin_username\"\n"
-                "ADMIN_DASHBOARD_PASSWORD=\"your_master_password\"\n"
-                "```\n"
-                "3. Save the `.env` file and refresh this page to log in.\n\n"
-                "🔒 *Only administrators with direct server access can configure portal credentials.*"
+                "Master credentials have not been configured on this server.\n\n"
+                "Please define `ADMIN_DASHBOARD_USERNAME` and `ADMIN_DASHBOARD_PASSWORD` in your server `.env` file."
             )
             return
 
@@ -335,52 +370,43 @@ def render_login_screen():
         is_locked, remaining_lockout = auth_manager.is_locked_out()
         if is_locked:
             st.error(
-                f"🛑 **Access Temporarily Locked Out**\n\n"
-                f"Too many failed login attempts detected. For security, administrative access is locked for "
-                f"**{remaining_lockout // 60}m {remaining_lockout % 60}s**.\n\n"
-                f"Please wait before trying again."
+                f"🛑 **Access Temporarily Paused**\n\n"
+                f"Too many failed attempts detected. Cooldown remaining: **{remaining_lockout}s**."
             )
+            if st.button("🔄 Reset & Try Again", key="btn_reset_lockout", use_container_width=True):
+                auth_manager.reset_failed_attempts()
+                st.rerun()
             return
 
         with st.form("admin_login_form", clear_on_submit=False):
-            st.markdown("##### Administrative Credentials")
-            username_input = st.text_input("Account Identifier / Username", placeholder="Enter your account name")
+            st.markdown("##### Administrative Login")
+            username_input = st.text_input("Account Identifier / Username", placeholder="Enter your username")
             password_input = st.text_input("Master Password", type="password", placeholder="••••••••••••••••")
 
-            submit_btn = st.form_submit_button("Authenticate & Enter Portal", type="primary", use_container_width=True)
+            submit_btn = st.form_submit_button("Log In", type="primary", use_container_width=True)
 
             if submit_btn:
                 if not username_input or not password_input:
-                    st.warning("⚠️ Please provide both your Account Identifier and Master Password.")
+                    st.warning("⚠️ Please provide both your username and password.")
                 else:
                     if auth_manager.verify_credentials(username_input, password_input):
                         auth_manager.reset_failed_attempts()
                         token = auth_manager.create_session_token(username_input.strip())
                         st.session_state["admin_session_token"] = token
                         st.query_params["_sess"] = token
-                        st.success("✅ Identity verified! Initiating secure weekly session...")
-                        time.sleep(0.5)
+                        st.success("✅ Identity verified! Loading portal...")
+                        time.sleep(0.4)
                         st.rerun()
                     else:
                         fails = auth_manager.record_failed_attempt()
                         remaining_attempts = max(0, MAX_FAILED_ATTEMPTS - fails)
                         if remaining_attempts > 0:
                             st.error(
-                                f"❌ **Invalid Account Identifier or Password.**\n\n"
-                                f"Security warning: **{remaining_attempts} attempt(s) remaining** before lockout."
+                                f"❌ **Invalid username or password.**\n\n"
+                                f"({remaining_attempts} attempt(s) remaining before cooldown)"
                             )
                         else:
                             st.rerun()
-
-        st.markdown(
-            """
-            <div style="margin-top: 20px; padding: 12px; background: rgba(30, 41, 59, 0.4); border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.1); font-size: 0.8rem; color: #94a3b8; text-align: center;">
-                🔒 <b>Security Protocols Enforced:</b><br/>
-                Argon2id Cryptographic Verification • 7-Day Automatic Weekly Reset • Anti-Brute-Force Lockout Shield
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
 
 def require_admin_auth() -> dict:
