@@ -1,0 +1,17 @@
+[Unit]
+Description=Waasz AI Founder Streamlit Dashboard
+After=network.target waasz-api.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Waasz-AI-Business-Analyst/sme-ai-business-analyst
+EnvironmentFile=/home/ubuntu/Waasz-AI-Business-Analyst/sme-ai-business-analyst/.env
+ExecStart=/home/ubuntu/Waasz-AI-Business-Analyst/sme-ai-business-analyst/venv/bin/streamlit run admin/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+Restart=always
+RestartSec=5s
+StandardOutput=append:/home/ubuntu/Waasz-AI-Business-Analyst/sme-ai-business-analyst/streamlit.log
+StandardError=append:/home/ubuntu/Waasz-AI-Business-Analyst/sme-ai-business-analyst/streamlit.log
+
+[Install]
+WantedBy=multi-user.target
