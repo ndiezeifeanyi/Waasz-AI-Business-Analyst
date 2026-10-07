@@ -578,7 +578,16 @@ class AgentService:
             system_prompt += f"\n### USER REFERENCE NOTES (BACKGROUND REFERENCE ONLY):\n{chunk_text}\n"
 
         if active_goals:
-            goals_text = "\n".join(f"- {g['title']} (target: {g['target_value'] or 'N/A'})" for g in active_goals)
+            def _format_goal(g):
+                if isinstance(g, dict):
+                    t = g.get("title", "")
+                    tv = g.get("target_value")
+                else:
+                    t = getattr(g, "title", "")
+                    tv = getattr(g, "target_value", None)
+                return f"- {t} (target: {tv or 'N/A'})"
+
+            goals_text = "\n".join(_format_goal(g) for g in active_goals)
             system_prompt += f"\n### ACTIVE GOALS (BACKGROUND REFERENCE ONLY):\n{goals_text}\n"
 
         # 3. Build messages list
