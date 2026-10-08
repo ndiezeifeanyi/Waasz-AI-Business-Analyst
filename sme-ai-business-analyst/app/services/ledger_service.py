@@ -157,12 +157,20 @@ class LedgerService:
             business = result.scalar_one_or_none()
 
         if not business:
+            from datetime import timedelta
+            now_utc = datetime.now(UTC)
+            trial_end_utc = now_utc + timedelta(days=14)
             business = Business(
                 name=f"WhatsApp Business {normalized[-4:]}",
                 owner_name=None,
                 phone_number=normalized,
                 business_type=None,
                 is_provisional=True,
+                settings={
+                    "trial_started_at": now_utc.isoformat(),
+                    "trial_expires_at": trial_end_utc.isoformat(),
+                    "onboarding_stage": "awaiting_business_name",
+                },
             )
             db.add(business)
             await db.flush()

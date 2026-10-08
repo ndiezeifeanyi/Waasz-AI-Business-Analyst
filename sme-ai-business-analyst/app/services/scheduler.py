@@ -173,6 +173,87 @@ class ReportScheduler:
             logger.exception("Daily inactivity nudge job failed: %s", exc)
             return 0
 
+    async def run_trial_lifecycle_check(self) -> int:
+        """Periodic job (hourly): check businesses whose 14-day free trial has expired."""
+        now_utc = datetime.now(UTC)
+        self.last_run_times["check_trial_lifecycle"] = now_utc.isoformat()
+        logger.info("Running scheduled trial lifecycle check at %s...", now_utc.isoformat())
+        sent_count = 0
+        try:
+            from app.models.business import Business
+            from app.models.user import User
+            from app.models.transaction import Transaction
+            from app.services.whatsapp_client import WhatsAppClient
+            from sqlalchemy import func, select
+
+            whatsapp = WhatsAppClient()
+            async with async_session_factory() as db:
+                stmt = select(Business)
+                res = await db.execute(stmt)
+                businesses = res.scalars().all()
+                for biz in businesses:
+                    b_settings = dict(biz.settings or {})
+                    expires_str = b_settings.get("trial_expires_at")
+                    already_notified = b_settings.get("trial_ended_notified", False)
+
+                    if not expires_str or already_notified:
+                        continue
+
+                    try:
+                        trial_expires = datetime.fromisoformat(expires_str)
+                        if trial_expires.tzinfo is None:
+                            trial_expires = trial_expires.replace(tzinfo=UTC)
+                    except Exception:
+                        continue
+
+                    if now_utc >= trial_expires:
+                        # Find owner user phone
+                        u_stmt = select(User).where(User.business_id == biz.id).order_by(User.created_at.asc()).limit(1)
+                        u_res = await db.execute(u_stmt)
+                        owner_user = u_res.scalars().first()
+                        if not owner_user or not owner_user.phone_number:
+                            continue
+
+                        # Calculate stats during the trial
+                        tx_stmt = select(
+                            func.count(Transaction.id).label("total_count"),
+                            func.coalesce(
+                                func.sum(Transaction.amount).filter(
+                                    Transaction.transaction_type == "sale",
+                                    Transaction.status == "confirmed",
+                                ),
+                                0,
+                            ).label("total_sales"),
+                        ).where(Transaction.business_id == biz.id)
+                        tx_stats = (await db.execute(tx_stmt)).first()
+                        total_tx = tx_stats.total_count if tx_stats else 0
+                        total_sales = float(tx_stats.total_sales) if tx_stats else 0.0
+
+                        summary_msg = (
+                            f"🎉 *Your 14-Day Waasz Free Trial is Complete!*\n\n"
+                            f"Here is what *{biz.name}* achieved on Waasz:\n"
+                            f"• Total Sales Logged: ₦{total_sales:,.2f}\n"
+                            f"• Total Transactions Recorded: {total_tx}\n"
+                            f"• Automated Bookkeeping: 100% Paperless & Backed Up\n\n"
+                            f"We hope Waasz has made managing your business effortless! "
+                            f"To continue keeping your books, issuing receipts, and receiving real-time profit analytics, activate your subscription.\n\n"
+                            f"💬 Reply *SUBSCRIBE* to keep your business running smoothly!"
+                        )
+
+                        await whatsapp.send_text(owner_user.phone_number, summary_msg)
+                        b_settings["trial_ended_notified"] = True
+                        b_settings["trial_status"] = "expired"
+                        biz.settings = b_settings
+                        sent_count += 1
+                        logger.info("Sent 14-day trial completion notice to %s (%s)", biz.name, owner_user.phone_number)
+
+                if sent_count > 0:
+                    await db.commit()
+            return sent_count
+        except Exception as exc:
+            logger.exception("Failed in trial lifecycle check: %s", exc)
+            return 0
+
     def start(self) -> None:
         self.scheduler.add_job(
             self.run_daily_inactivity_nudges,
@@ -277,6 +358,14 @@ class ReportScheduler:
             "interval",
             hours=24,
             id="refresh_resolved_models",
+            replace_existing=True,
+        )
+        # Trial lifecycle check every 1 hour
+        self.scheduler.add_job(
+            self.run_trial_lifecycle_check,
+            "interval",
+            hours=1,
+            id="check_trial_lifecycle",
             replace_existing=True,
         )
         self.scheduler.start()

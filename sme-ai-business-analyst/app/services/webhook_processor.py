@@ -352,6 +352,25 @@ class WhatsAppWebhookProcessor:
                 await db.flush()
             return
 
+        # Deterministic Onboarding Stage & Week 1 Review handling
+        onboarding_reply = await self._try_handle_onboarding_and_feedback(db, parsed, business, user)
+        if onboarding_reply:
+            inbound.status = "processed"
+            if hasattr(db, "commit"):
+                await db.commit()
+            elif hasattr(db, "flush"):
+                await db.flush()
+
+            send_result = await self.whatsapp.send_text(parsed.from_phone, onboarding_reply)
+            await self.ledger.record_outbound_message(
+                db, business.id, parsed.from_phone, onboarding_reply, send_result, user_id=user.id
+            )
+            if hasattr(db, "commit"):
+                await db.commit()
+            elif hasattr(db, "flush"):
+                await db.flush()
+            return
+
         pending = await self.confirmations.latest_actionable(
             db, business.id, member_id=actor.member_id
         )
@@ -1121,9 +1140,14 @@ class WhatsAppWebhookProcessor:
 
         return (
             f"{header}"
-            "I'm your AI business assistant right here on WhatsApp. You can record daily sales & expenses, track inventory & low-stock alerts, generate instant PDF receipts, manage customer debts, and receive weekly & monthly business summaries.\n\n"
-            "🧾 *One-Time Setup for Receipts & Invoices:*\n"
-            "To personalize your PDF receipts and invoices with your real store details, just reply anytime:\n"
+            "I'm your AI business manager right here on WhatsApp. I help you track daily sales & expenses, monitor stock & low-stock alerts, print instant branded PDF receipts, manage customer debts, and receive weekly & monthly business summaries—*without any paperwork.*\n\n"
+            "🎁 *You have been activated on a 14-Day Free Trial!*\n"
+            "Explore all features freely to track your business numbers and test automated reports.\n\n"
+            "🏪 *First Step — Set up your Shop:*\n"
+            "*What is the name of your shop or business?*\n"
+            "(e.g. reply: *\"Emeka Stores\"* or *\"Blessing Boutique\"*)\n\n"
+            "🧾 *Receipts & Invoices Personalization:*\n"
+            "To personalize your PDF receipts and invoices with your real store details, you can reply anytime:\n"
             "• *Set business name: [Your Store Name]* (e.g. _Set business name: Ify Bookshop_)\n"
             "• *Set address: [Your Store Address]* (e.g. _Set address: 12 Marina, Lagos_)\n"
             "• (Optional) Send a picture of your store logo with caption *Set logo*\n\n"
@@ -1135,9 +1159,137 @@ class WhatsAppWebhookProcessor:
             "• *Data Rights:* You have complete control. You can ask me to *'delete my data'* or *'forget me'* at any time to permanently erase your records from our systems.\n\n"
             "📌 *Note on AI Advice:* Any business insights, pricing simulations, or forecasts I provide are AI-generated estimates to guide your decision-making, not professional financial, tax, or legal advice. Final business choices always remain yours."
             f"{drive_suggestion}\n\n"
-            "How can I help your business today?"
+            "---\n"
+            "👉 *To get started now: What is the name of your shop or business?*"
             f"{referral_msg}"
         )
+
+    async def _try_handle_onboarding_and_feedback(
+        self, db: AsyncSession, parsed: ParsedWhatsAppMessage, business: Business, user: User
+    ) -> str | None:
+        """
+        Handles:
+        1. Capturing shop/business name when newly onboarded.
+        2. Capturing receipt address/bank details or handling 'Skip'.
+        3. Capturing Week 1 review rating and feedback.
+        """
+        raw_text = (parsed.body or "").strip()
+        if not raw_text:
+            return None
+
+        settings_dict = business.settings or {}
+        stage = settings_dict.get("onboarding_stage")
+
+        # 1. Week 1 Review & Feedback reply
+        if settings_dict.get("awaiting_week1_feedback"):
+            clean_first = raw_text.split()[0].replace("*", "").replace(".", "").strip()
+            rating = None
+            if clean_first in ("1", "2", "3", "4", "5"):
+                rating = int(clean_first)
+
+            new_settings = dict(settings_dict)
+            new_settings["awaiting_week1_feedback"] = False
+            new_settings["week1_reviewed_at"] = datetime.now(UTC).isoformat()
+            if rating:
+                new_settings["review_rating"] = f"{rating} Star{'s' if rating > 1 else ''}"
+            new_settings["review_feedback"] = raw_text
+            business.settings = new_settings
+            await db.flush()
+            return "🙏 Thank you so much for your feedback! It helps our team continue making Waasz even better for your business."
+
+        # If already fully onboarded, return None so normal tools/agent handle it
+        if stage == "completed":
+            return None
+
+        # Check if the user is sending an obvious financial transaction or command
+        lower_text = raw_text.lower()
+        is_transaction = any(kw in lower_text for kw in (
+            "sold", "sale", "bought", "buy", "expense", "paid", "credit", "₦", "naira", "bag", "carton"
+        )) and any(char.isdigit() for char in raw_text)
+
+        if is_transaction:
+            if stage in ("awaiting_business_name", "awaiting_receipt_details"):
+                new_settings = dict(settings_dict)
+                new_settings["onboarding_stage"] = "completed"
+                business.settings = new_settings
+                await db.flush()
+            return None
+
+        # 2. Stage: Awaiting Business Name
+        if stage == "awaiting_business_name" or (business.is_provisional and business.name.startswith("WhatsApp Business ")):
+            shop_name = re.sub(
+                r"^(my\s+(shop|business|store|company)\s+(name\s+)?(is|:)?|it\s+is\s+|name\s*:\s*)",
+                "",
+                raw_text,
+                flags=re.IGNORECASE,
+            ).strip().strip("\"'").strip()
+
+            if not shop_name or len(shop_name) < 2:
+                return None
+
+            business.name = shop_name
+            business.is_provisional = False
+
+            from app.models.receipt_template import ReceiptTemplate
+            tmpl_stmt = select(ReceiptTemplate).where(ReceiptTemplate.business_id == business.id).limit(1)
+            tmpl_res = await db.execute(tmpl_stmt)
+            tmpl = tmpl_res.scalar_one_or_none()
+            if not tmpl:
+                tmpl = ReceiptTemplate(
+                    business_id=business.id,
+                    business_display_name=shop_name,
+                    contact_phone=business.phone_number,
+                )
+                db.add(tmpl)
+            else:
+                tmpl.business_display_name = shop_name
+
+            new_settings = dict(settings_dict)
+            new_settings["onboarding_stage"] = "awaiting_receipt_details"
+            business.settings = new_settings
+            await db.flush()
+
+            return (
+                f"Awesome! *{shop_name}* is registered on your 14-Day Free Trial 🎉\n\n"
+                "To brand your official PDF receipts & invoices so they look professional for your customers:\n\n"
+                "📍 *What is your store address?* (e.g. _'12 Market Road, Aba'_ or reply *'Skip'*)\n"
+                "💳 *Bank details for customer payments?* (e.g. _'GTBank 0123456789'_ or reply *'Skip'*)\n"
+                "🖼️ (Optional: Send a photo of your store logo anytime with caption *Set logo*)\n\n"
+                "*(You can update these anytime. Whenever you're ready to start recording sales, just type or send a voice note: e.g. \"Sold 2 bags of sugar ₦30,000 cash\")*"
+            )
+
+        # 3. Stage: Awaiting Receipt Details (Address / Bank info)
+        if stage == "awaiting_receipt_details":
+            new_settings = dict(settings_dict)
+            new_settings["onboarding_stage"] = "completed"
+            business.settings = new_settings
+
+            if lower_text in ("skip", "later", "no", "not now", "next", "pass"):
+                await db.flush()
+                return (
+                    f"✅ All set! You're ready to start tracking *{business.name}*.\n\n"
+                    "Try logging your first sale right now:\n"
+                    "👉 Text or voice note: *\"Sold 3 bags of rice for ₦150,000 cash\"*"
+                )
+
+            from app.models.receipt_template import ReceiptTemplate
+            tmpl_stmt = select(ReceiptTemplate).where(ReceiptTemplate.business_id == business.id).limit(1)
+            tmpl_res = await db.execute(tmpl_stmt)
+            tmpl = tmpl_res.scalar_one_or_none()
+            if tmpl:
+                if any(kw in lower_text for kw in ("bank", "account", "acct", "transfer", "gtb", "zenith", "access", "uba", "opay", "kuda", "palmpay")):
+                    tmpl.payment_terms_note = raw_text
+                else:
+                    tmpl.address = raw_text
+            await db.flush()
+
+            return (
+                f"✅ Receipt details saved for *{business.name}*!\n\n"
+                "You're ready to start recording. Try logging your first sale right now:\n"
+                "👉 Text or voice note: *\"Sold 3 bags of rice for ₦150,000 cash\"*"
+            )
+
+        return None
 
     async def _source_text(self, parsed: ParsedWhatsAppMessage, image_bytes: bytes | None = None) -> str:
         if parsed.message_type == "text":

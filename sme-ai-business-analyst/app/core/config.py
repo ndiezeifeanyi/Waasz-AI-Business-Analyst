@@ -46,9 +46,9 @@ class Settings(BaseSettings):
     waasz_whatsapp_url: str = "https://wa.me/2349044765496"
 
     # Access Control & Strategy
-    access_mode: str = "allowlist"  # "allowlist" | "invite_code" | "open"
-    max_active_users: int = 20
-    require_invite_code: bool = True
+    access_mode: str = "open"  # "allowlist" | "invite_code" | "open"
+    max_active_users: int = 100
+    require_invite_code: bool = False
     enable_user_referrals: bool = False
 
     # Admin Dashboard Authentication & Security (Configured via .env or first-time setup wizard)

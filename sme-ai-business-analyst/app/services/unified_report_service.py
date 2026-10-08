@@ -228,6 +228,25 @@ class UnifiedReportService:
             user, cadence, curr_acts, prior_acts, goals, bi_evidence=bi_evidence
         )
 
+        # Check if weekly report should trigger Week 1 user review check-in
+        if cadence == "weekly" and user.business_id:
+            try:
+                biz = await db.get(Business, user.business_id)
+                if biz:
+                    b_settings = dict(biz.settings or {})
+                    if not b_settings.get("review_prompt_sent"):
+                        b_settings["review_prompt_sent"] = True
+                        b_settings["awaiting_week1_feedback"] = True
+                        biz.settings = b_settings
+                        review_prompt = (
+                            "\n\n⭐ *Week 1 Check-in with Waasz*\n"
+                            "You've completed your first week of smart bookkeeping! How was your experience?\n"
+                            "Reply with a rating from *1 to 5* (e.g. '5 Great so far!'), plus any features you'd like us to add."
+                        )
+                        report_text += review_prompt
+            except Exception as e_rev:
+                logger.warning("Failed to attach week 1 review prompt: %s", e_rev)
+
         # 4. Check 24-hour customer care window
         last_inbound = user.last_inbound_at or (now - timedelta(hours=48))
         if last_inbound.tzinfo is None:

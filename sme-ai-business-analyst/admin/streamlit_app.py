@@ -167,6 +167,164 @@ if selected_business_id:
     params = (selected_business_id,)
 
 with tab_overview:
+    # 1. Live Onboarded Businesses & 14-Day Free Trial Tracker
+    st.subheader("👥 Live Onboarded Businesses & 14-Day Free Trial Tracker")
+    st.caption("Live sync of all businesses interacting with Waasz on WhatsApp: onboarding progress, trial days remaining, transactions, and reviews.")
+
+    trial_tracker_raw = query_df(
+        """
+        select
+            b.id::text as business_id,
+            b.name as business_name,
+            coalesce(u.phone_number, b.phone_number) as phone_number,
+            b.created_at,
+            u.last_inbound_at,
+            coalesce(b.settings->>'onboarding_stage', 'completed') as onboarding_stage,
+            b.settings->>'trial_started_at' as trial_started_at,
+            b.settings->>'trial_expires_at' as trial_expires_at,
+            b.settings->>'trial_status' as trial_status,
+            b.settings->>'review_rating' as review_rating,
+            b.settings->>'review_feedback' as review_feedback,
+            count(t.id) as total_tx_count,
+            coalesce(sum(case when t.transaction_type = 'sale' and t.status = 'confirmed' then t.amount else 0 end), 0) as total_sales_ngn
+        from businesses b
+        left join users u on u.business_id = b.id
+        left join transactions t on t.business_id = b.id
+        where b.deleted_at is null
+        group by b.id, b.name, b.phone_number, u.phone_number, b.created_at, u.last_inbound_at, b.settings
+        order by b.created_at desc
+        """
+    )
+
+    if not trial_tracker_raw.empty:
+        from datetime import datetime, timezone
+
+        now_utc = datetime.now(timezone.utc)
+        
+        # Calculate summary KPI cards
+        total_biz = len(trial_tracker_raw)
+        active_trials_count = 0
+        total_all_sales = float(trial_tracker_raw["total_sales_ngn"].sum())
+        total_all_tx = int(trial_tracker_raw["total_tx_count"].sum())
+        
+        ratings = []
+        status_list = []
+        stage_list = []
+        sales_disp_list = []
+        joined_list = []
+        last_seen_list = []
+        rating_disp_list = []
+        feedback_list = []
+
+        for _, row in trial_tracker_raw.iterrows():
+            # Trial calculation
+            exp_str = row.get("trial_expires_at")
+            if exp_str and pd.notna(exp_str):
+                try:
+                    exp_dt = datetime.fromisoformat(str(exp_str))
+                    if exp_dt.tzinfo is None:
+                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                    days_left = (exp_dt - now_utc).days
+                    if now_utc > exp_dt:
+                        status_list.append("⚠️ Expired (Day 14+)")
+                    else:
+                        active_trials_count += 1
+                        days_elapsed = max(1, 14 - max(0, days_left))
+                        status_list.append(f"🟢 Day {days_elapsed} of 14 ({days_left}d left)")
+                except Exception:
+                    status_list.append("🟢 Active Trial")
+                    active_trials_count += 1
+            else:
+                status_list.append("🟢 14-Day Trial")
+                active_trials_count += 1
+
+            # Stage formatting
+            stg = str(row.get("onboarding_stage", "completed"))
+            if stg == "awaiting_business_name":
+                stage_list.append("📝 Awaiting Shop Name")
+            elif stg == "awaiting_receipt_details":
+                stage_list.append("🧾 Awaiting Receipt Setup")
+            else:
+                stage_list.append("✅ Active / Ready")
+
+            # Sales formatting
+            sales_disp_list.append(f"₦{float(row.get('total_sales_ngn', 0)):,.2f}")
+
+            # Joined date
+            c_at = row.get("created_at")
+            if pd.notna(c_at):
+                joined_list.append(str(c_at)[:16])
+            else:
+                joined_list.append("-")
+
+            # Last seen
+            l_in = row.get("last_inbound_at")
+            if pd.notna(l_in):
+                last_seen_list.append(str(l_in)[:16])
+            else:
+                last_seen_list.append("-")
+
+            # Review & Feedback
+            r_val = row.get("review_rating")
+            if pd.notna(r_val) and str(r_val).isdigit():
+                r_num = int(r_val)
+                ratings.append(r_num)
+                rating_disp_list.append(f"{'⭐' * r_num} ({r_num}/5)")
+            else:
+                rating_disp_list.append("Pending")
+
+            f_val = row.get("review_feedback")
+            if pd.notna(f_val) and str(f_val).strip():
+                feedback_list.append(str(f_val).strip())
+            else:
+                feedback_list.append("-")
+
+        # Top Trial KPIs
+        kpi_c1, kpi_c2, kpi_c3, kpi_c4, kpi_c5 = st.columns(5)
+        kpi_c1.metric("Total Onboarded", total_biz, help="All businesses registered via WhatsApp")
+        kpi_c2.metric("Active Free Trials", active_trials_count, help="Businesses currently within their 14-day trial")
+        kpi_c3.metric("Total Sales Tracked", f"₦{total_all_sales:,.0f}", help="Total sales revenue logged during trials")
+        kpi_c4.metric("Transactions Logged", total_all_tx, help="Total transaction records created")
+        avg_rating_str = f"⭐ {sum(ratings)/len(ratings):.1f}/5" if ratings else "No reviews yet"
+        kpi_c5.metric("Avg User Rating", avg_rating_str, help="Average Week 1 review rating")
+
+        # Create structured display DataFrame
+        disp_df = pd.DataFrame({
+            "Business Name": trial_tracker_raw["business_name"],
+            "WhatsApp Phone": trial_tracker_raw["phone_number"],
+            "Joined": joined_list,
+            "Trial Status": status_list,
+            "Onboarding Stage": stage_list,
+            "Total Sales": sales_disp_list,
+            "Transactions": trial_tracker_raw["total_tx_count"],
+            "Week 1 Review": rating_disp_list,
+            "Customer Feedback": feedback_list,
+            "Last Active": last_seen_list,
+        })
+
+        # Search filter
+        search_kw = st.text_input("🔍 Search Onboarded Businesses", placeholder="Filter by business name or phone...", key="search_tracker_input")
+        if search_kw.strip():
+            kw = search_kw.strip().lower()
+            disp_df = disp_df[
+                disp_df["Business Name"].str.lower().str.contains(kw, na=False)
+                | disp_df["WhatsApp Phone"].str.lower().str.contains(kw, na=False)
+            ]
+
+        st.dataframe(disp_df, use_container_width=True, hide_index=True)
+
+        # Highlight reviews if present
+        reviews_exist = [f for f in feedback_list if f != "-"]
+        if reviews_exist:
+            with st.expander(f"💬 Live Customer Feedback & Reviews ({len(reviews_exist)} submitted)"):
+                for idx, r_row in trial_tracker_raw[trial_tracker_raw["review_feedback"].notna()].iterrows():
+                    st.markdown(f"**{r_row['business_name']}** ({r_row['phone_number']}) — {r_row.get('review_rating', 'N/A')}⭐")
+                    st.caption(f"\"{r_row['review_feedback']}\"")
+                    st.divider()
+    else:
+        st.info("No businesses onboarded yet. New WhatsApp signups will appear here live.")
+
+    st.write("---")
     st.subheader("📊 Business Performance & Daily Rollups")
     rollups = query_df(
         f"""
@@ -766,7 +924,7 @@ with tab_invites:
             u.is_active,
             case
                 when a.id is not null then '✅ Approved Tester'
-                else '⚠️ Not in Allowlist'
+                else '🟢 Self-Registered'
             end as allowlist_status,
             u.created_at
         from users u
