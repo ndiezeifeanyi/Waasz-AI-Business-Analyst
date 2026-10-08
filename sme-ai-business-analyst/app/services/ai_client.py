@@ -47,27 +47,33 @@ class AiAgentResult:
 
 
 class AiClient:
-    """LangChain-backed provider chain: Gemini, Groq, then OpenAI fallback with dynamic model resolution."""
+    """LangChain-backed provider chain: OpenAI, Groq, then Gemini with dynamic model resolution and credit-balancing."""
+
+    _chat_counter: int = 0
 
     def __init__(self, cost_monitor: CostMonitor | None = None) -> None:
         self.cost_monitor = cost_monitor or CostMonitor()
 
-    def provider_chain(self, capability: Capability = "chat") -> list[ProviderConfig]:
-        providers: list[ProviderConfig] = []
-        if settings.gemini_api_key and settings.gemini_api_key != "placeholder_gemini_key":
-            models = model_resolver.get_candidate_models("gemini", capability)
-            if not models:
-                primary = model_resolver.get_model("gemini", capability)
-                if primary:
-                    models = [primary]
-            for m in models:
-                providers.append(ProviderConfig("gemini", m, settings.gemini_api_key))
+    def provider_chain(
+        self, capability: Capability = "chat", operation: str = "chat"
+    ) -> list[ProviderConfig]:
+        """
+        Builds the provider fallback chain with smart credit-balancing protection.
+        Default priority order: OpenAI -> Groq -> Gemini.
 
-        if settings.groq_api_key and settings.groq_api_key != "placeholder_groq_key":
-            groq_model = model_resolver.get_model("groq", capability)
-            if groq_model:
-                providers.append(ProviderConfig("groq", groq_model, settings.groq_api_key))
-
+        Balancing & Credit Conservation:
+        1. Multimodal Vision: Groq lacks tool-enabled vision; routes OpenAI -> Gemini.
+        2. Utility / JSON operations (e.g. complete_json, extraction, classification):
+           Prioritizes Groq -> OpenAI -> Gemini so routine background tasks do not
+           burn paid OpenAI credits, keeping the OpenAI balance reserved for users.
+        3. Conversational User Chat ('agent_chat', 'chat'):
+           - If ai_balance_mode == 'smart_balanced': Balances between OpenAI and Groq
+             (1:1 round-robin), cutting OpenAI burn rate by ~50% while guaranteeing that if either
+             provider hits rate limits/errors, the other steps in immediately as fallback,
+             with Gemini as tertiary safety net.
+           - If ai_balance_mode == 'openai_first': Strictly puts OpenAI first: OpenAI -> Groq -> Gemini.
+        """
+        openai_configs: list[ProviderConfig] = []
         if settings.openai_api_key and settings.openai_api_key != "placeholder_openai_key":
             models = model_resolver.get_candidate_models("openai", capability)
             if not models:
@@ -75,8 +81,72 @@ class AiClient:
                 if primary:
                     models = [primary]
             for m in models:
-                providers.append(ProviderConfig("openai", m, settings.openai_api_key))
-        return providers
+                openai_configs.append(ProviderConfig("openai", m, settings.openai_api_key))
+
+        groq_configs: list[ProviderConfig] = []
+        if settings.groq_api_key and settings.groq_api_key != "placeholder_groq_key":
+            groq_model = model_resolver.get_model("groq", capability)
+            if groq_model:
+                groq_configs.append(ProviderConfig("groq", groq_model, settings.groq_api_key))
+
+        gemini_configs: list[ProviderConfig] = []
+        if settings.gemini_api_key and settings.gemini_api_key != "placeholder_gemini_key":
+            models = model_resolver.get_candidate_models("gemini", capability)
+            if not models:
+                primary = model_resolver.get_model("gemini", capability)
+                if primary:
+                    models = [primary]
+            for m in models:
+                gemini_configs.append(ProviderConfig("gemini", m, settings.gemini_api_key))
+
+        provider_map = {
+            "openai": openai_configs,
+            "groq": groq_configs,
+            "gemini": gemini_configs,
+        }
+
+        # 1. Vision Capability (Groq lacks vision tool-calling)
+        if capability == "vision":
+            return openai_configs + gemini_configs + groq_configs
+
+        # 2. Utility / JSON Extraction tasks -> Preserve paid credits via Groq first
+        is_utility_task = operation in (
+            "complete_json",
+            "extract_record",
+            "classify_intent",
+            "qa_intent",
+            "fallback_live_search",
+            "niche_analysis",
+            "historical_summary",
+        )
+        if is_utility_task and groq_configs:
+            return groq_configs + openai_configs + gemini_configs
+
+        # 3. Conversational Chat / General Operations
+        balance_mode = getattr(settings, "ai_balance_mode", "smart_balanced").lower()
+
+        if balance_mode == "smart_balanced" and openai_configs and groq_configs:
+            AiClient._chat_counter += 1
+            if AiClient._chat_counter % 2 == 1:
+                # Turn A: OpenAI primary, Groq fallback, Gemini tertiary
+                return openai_configs + groq_configs + gemini_configs
+            else:
+                # Turn B: Groq primary, OpenAI fallback, Gemini tertiary
+                return groq_configs + openai_configs + gemini_configs
+
+        # 4. Standard / Configured Order (default: OpenAI -> Groq -> Gemini)
+        configured_order = [
+            p.strip().lower()
+            for p in getattr(settings, "ai_provider_order", "openai,groq,gemini").split(",")
+            if p.strip().lower() in provider_map
+        ]
+        if not configured_order:
+            configured_order = ["openai", "groq", "gemini"]
+
+        ordered: list[ProviderConfig] = []
+        for p in configured_order:
+            ordered.extend(provider_map.get(p, []))
+        return ordered
 
     async def complete_json(
         self,
@@ -87,7 +157,7 @@ class AiClient:
         db: AsyncSession | None = None,
         business_id: UUID | None = None,
     ) -> AiJsonResult | None:
-        providers = self.provider_chain()
+        providers = self.provider_chain(capability="chat", operation=operation)
         if not providers:
             return None
 
@@ -167,7 +237,7 @@ class AiClient:
             for m in messages
         )
         capability: Capability = "vision" if has_images else "chat"
-        providers = self.provider_chain(capability=capability)
+        providers = self.provider_chain(capability=capability, operation=operation)
         if not providers:
             return None
 

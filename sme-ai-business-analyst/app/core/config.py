@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     groq_model: str = "llama-3.1-70b-versatile"
     openai_api_key: str = ""
     openai_fallback_model: str = "gpt-4o-mini"
+    ai_provider_order: str = "openai,groq,gemini"
+    ai_balance_mode: str = "smart_balanced"
 
     # OCR and Voice
     google_application_credentials: str = ""
