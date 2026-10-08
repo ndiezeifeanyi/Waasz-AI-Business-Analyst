@@ -254,6 +254,148 @@ class ReportScheduler:
             logger.exception("Failed in trial lifecycle check: %s", exc)
             return 0
 
+    async def run_backlogged_onboarding_dispatch(self) -> int:
+        """
+        One-off scheduled dispatch strictly for tomorrow (2026-10-09 at 9:00 AM WAT):
+        Sends personalized responses to users previously turned down by private beta restriction,
+        along with full 14-day trial welcome and shop setup flow.
+        Cancels/aborts automatically if run beyond tomorrow (2026-10-09).
+        """
+        import zoneinfo
+        from datetime import date
+        try:
+            wat_tz = zoneinfo.ZoneInfo(settings.local_timezone)
+        except Exception:
+            wat_tz = UTC
+        now_local = datetime.now(wat_tz)
+
+        # Strict constraint: only tomorrow (2026-10-09). Anything beyond gets cancelled!
+        target_date = date(2026, 10, 9)
+        if now_local.date() != target_date:
+            logger.warning(
+                "Backlogged onboarding dispatch cancelled: current date %s is not target date %s",
+                now_local.date(),
+                target_date,
+            )
+            return 0
+
+        self.last_run_times["dispatch_backlogged_onboarding"] = now_local.isoformat()
+        logger.info("Executing backlogged onboarding dispatch for target date %s at %s...", target_date, now_local.isoformat())
+
+        from sqlalchemy import text
+        from app.services.whatsapp_client import WhatsAppClient
+        from app.services.ledger_service import LedgerService
+
+        whatsapp = WhatsAppClient()
+        ledger = LedgerService()
+        sent_count = 0
+
+        standard_body = (
+            "\n\n📋 *How Waasz Works:*\n"
+            "• Just text or send voice notes: \"Sold 2 bags of rice ₦70k\" or \"Bought fuel ₦15,000\"\n"
+            "• Ask anytime: \"What is my profit today?\" or \"Who owes me money?\"\n"
+            "• Get automated daily & weekly business summaries right here.\n\n"
+            "🔒 *Data Privacy & Protection:*\n"
+            "In full compliance with NDPA guidelines, your financial records are strictly private, encrypted, and never shared. We also support automated backups directly to your own Google Drive.\n\n"
+            "What is the name of your shop or business? (e.g., 'Emeka Stores')\n\n"
+            "*(Once you reply with your business name, we will also help you set up your store receipts so you can issue branded PDF receipts to your customers instantly!)*"
+        )
+
+        recipients = [
+            {
+                "phone": "2349129454869",
+                "intro": (
+                    "👋 Hello!\n\n"
+                    "You recently reached out with a greeting while Waasz was in private testing. "
+                    "We're excited to let you know that Waasz is now officially open, and you have been activated on a 14-Day Free Trial! 🎉"
+                ),
+            },
+            {
+                "phone": "2348141917654",
+                "intro": (
+                    "👋 Hello!\n\n"
+                    "You recently sent us a message asking to try Waasz while our private testing gate was active. "
+                    "Thank you so much for your patience—our platform is now officially open, and your 14-Day Free Trial is live! 🎉"
+                ),
+            },
+            {
+                "phone": "2348113179049",
+                "intro": (
+                    "👋 Hello!\n\n"
+                    "You previously messaged us about tracking baking ingredient expenses and budgets for your bakery and catering business while we were in a restricted test. "
+                    "We are thrilled to let you know that Waasz is now officially open, and your 14-Day Free Trial is active! 🎉"
+                ),
+            },
+            {
+                "phone": "2348165942327",
+                "intro": (
+                    "👋 Hello!\n\n"
+                    "You previously asked what Waasz does when our private testing gate was active. "
+                    "Waasz is your AI business manager right here on WhatsApp—helping Nigerian shop owners track daily sales, expenses, and customer debts without any paperwork. "
+                    "We are now officially open, and your 14-Day Free Trial is live! 🎉"
+                ),
+            },
+            {
+                "phone": "2347031243018",
+                "intro": (
+                    "👋 Hello!\n\n"
+                    "You asked what Waasz is about when our private testing was active. "
+                    "Waasz is your AI business manager right here on WhatsApp—helping you track your daily sales, expenses, customer debts, and issue digital receipts 100% paperless. "
+                    "We are now officially open, and your 14-Day Free Trial is live! 🎉"
+                ),
+            },
+            {
+                "phone": "2349161281648",
+                "intro": (
+                    "👋 Hello Nonso!\n\n"
+                    "You previously chatted with us while Waasz was in private testing. "
+                    "We're happy to let you know that Waasz is now officially open with a 14-Day Free Trial to track daily finances, business sales, expenses, and automated WhatsApp reminders! 🎉"
+                ),
+            },
+        ]
+
+        async with async_session_factory() as db:
+            # Check idempotency guard
+            check_res = await db.execute(
+                text("SELECT value FROM system_settings WHERE key = 'backlogged_onboarding_sent_20261009'")
+            )
+            val = check_res.scalar_one_or_none()
+            if val == "true":
+                logger.info("Backlogged onboarding messages were already dispatched. Skipping.")
+                return 0
+
+            for r in recipients:
+                phone = r["phone"]
+                full_message = r["intro"] + standard_body
+                try:
+                    init_res = await ledger.get_or_create_business_and_user(db, phone)
+                    if isinstance(init_res, tuple) and len(init_res) >= 2:
+                        business, user = init_res[0], init_res[1]
+                    else:
+                        business, user = init_res
+
+                    send_res = await whatsapp.send_text(phone, full_message)
+                    await ledger.record_outbound_message(
+                        db, business.id, phone, full_message, send_res, user_id=user.id
+                    )
+                    sent_count += 1
+                    logger.info("Successfully dispatched backlogged onboarding to %s", phone)
+                except Exception as exc:
+                    logger.exception("Failed to dispatch backlogged onboarding to %s: %s", phone, exc)
+
+            # Mark idempotency key so it will never run again
+            await db.execute(
+                text("""
+                    INSERT INTO system_settings (key, value, updated_at)
+                    VALUES ('backlogged_onboarding_sent_20261009', 'true', NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = 'true', updated_at = NOW();
+                """)
+            )
+            await db.commit()
+
+        logger.info("Finished backlogged onboarding dispatch: %d sent", sent_count)
+        return sent_count
+
     def start(self) -> None:
         self.scheduler.add_job(
             self.run_daily_inactivity_nudges,
@@ -366,6 +508,20 @@ class ReportScheduler:
             "interval",
             hours=1,
             id="check_trial_lifecycle",
+            replace_existing=True,
+        )
+        # One-off backlogged onboarding dispatch: strictly for tomorrow (2026-10-09) at 9:00 AM WAT
+        self.scheduler.add_job(
+            self.run_backlogged_onboarding_dispatch,
+            CronTrigger(
+                year=2026,
+                month=10,
+                day=9,
+                hour=9,
+                minute=0,
+                timezone=settings.local_timezone,
+            ),
+            id="dispatch_backlogged_onboarding_20261009",
             replace_existing=True,
         )
         self.scheduler.start()
