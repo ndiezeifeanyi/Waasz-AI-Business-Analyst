@@ -131,18 +131,17 @@ class WhatsAppWebhookProcessor:
                         pass
 
     async def process_message(self, db: AsyncSession, parsed: ParsedWhatsAppMessage, event) -> None:
-        # Check message freshness (reject stale Meta retry webhooks older than 2 hours)
+        # Log message freshness for telemetry without dropping legitimate messages
         if parsed.timestamp:
             age = (datetime.now(UTC) - parsed.timestamp).total_seconds()
             if age > 7200:
-                logger.warning(
-                    "Ignoring stale WhatsApp message %s from %s (timestamp: %s, age: %.1f seconds)",
+                logger.info(
+                    "WhatsApp message %s from %s arrived with older timestamp (timestamp: %s, age: %.1f seconds), continuing processing.",
                     parsed.message_id,
                     parsed.from_phone,
                     parsed.timestamp,
                     age,
                 )
-                return
 
         # Check for WhatsApp group chat message
         raw = parsed.raw_payload or {}
