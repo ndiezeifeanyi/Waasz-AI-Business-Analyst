@@ -131,6 +131,19 @@ class WhatsAppWebhookProcessor:
                         pass
 
     async def process_message(self, db: AsyncSession, parsed: ParsedWhatsAppMessage, event) -> None:
+        # Check message freshness (reject stale Meta retry webhooks older than 2 hours)
+        if parsed.timestamp:
+            age = (datetime.now(UTC) - parsed.timestamp).total_seconds()
+            if age > 7200:
+                logger.warning(
+                    "Ignoring stale WhatsApp message %s from %s (timestamp: %s, age: %.1f seconds)",
+                    parsed.message_id,
+                    parsed.from_phone,
+                    parsed.timestamp,
+                    age,
+                )
+                return
+
         # Check for WhatsApp group chat message
         raw = parsed.raw_payload or {}
         is_group = bool(
@@ -891,6 +904,7 @@ class WhatsAppWebhookProcessor:
                 # User sent an unrelated message (e.g. a new full transaction, question, reminder) - abandon the stale clarification
                 recent_clarification.status = "abandoned"
 
+        is_voice = (parsed.message_type == "audio")
         try:
             reply_text = await self.agent.process_user_message(
                 db=db,
@@ -901,6 +915,7 @@ class WhatsAppWebhookProcessor:
                 image_bytes=raw_image_bytes,
                 actor=actor,
                 source_wamid=parsed.message_id,
+                is_voice=is_voice,
             )
         except Exception as agent_exc:
             reply_text = None
@@ -916,6 +931,7 @@ class WhatsAppWebhookProcessor:
                             inbound_message_id=inbound.id,
                             actor=actor,
                             source_wamid=parsed.message_id,
+                            is_voice=False,
                         )
                 except Exception:
                     pass
