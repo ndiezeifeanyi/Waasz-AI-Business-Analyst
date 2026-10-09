@@ -178,7 +178,13 @@ Previous standalone bookkeeping mobile applications (e.g., first-generation fint
   * Step 2: On receipt of shop name $\rightarrow$ prompts for Store Address and Bank Account details for customer receipts (or "Skip").
   * Step 3: Immediate readiness $\rightarrow$ merchant can start texting transactions immediately.
 * **Req 9.3 — Week 1 Review & Feedback Check-In:** At the end of Week 1 (following their first weekly report), automated prompt requests a 1–5 star rating and feature suggestions, storing responses in the database.
-* **Req 9.4 — Day 14 Trial Completion Notice:** Automated scheduler calculates total sales and transactions recorded over the trial period, delivers a congratulatory summary, and presents monthly subscription options.
+* **Req 9.4 — Day 12 Automated Pre-Expiry Sequence (2 Days Before Expiry):** Exactly 48 hours before trial conclusion, an automated scheduler dispatches an actionable WhatsApp notification presenting two paths to continue:
+  * **Option A (Instant Renewal - ₦1,000 Flat):** Promotional flat access pegged at **₦1,000 / month** unlocking all premium features (unlimited voice/text logging, branded PDF receipts, automated debt tracking, and visual analytics). Powered by direct Paystack one-tap payment link or dedicated bank transfer.
+  * **Option B (Viral Referral Loop):** Every merchant receives a personal referral link (`wa.me/[NUMBER]?text=START+REF_[CODE]`). If they bring in **4 new business owners** who activate their accounts, the merchant automatically earns an extra **+14 days free trial** added directly to their account.
+* **Req 9.5 — Day 14 Trial Expiration & Soft-Lock:** If neither renewal nor 4 referrals are completed by Day 14, automated scheduler sends a congratulatory business summary (total sales & receipts generated during trial) and politely soft-locks transaction logging until renewal or referral completion.
+* **Req 9.6 — Founder Override Precedence Rule:** Founder manual actions in the admin dashboard take strict precedence over automated trial logic:
+  * Founder 1-click trial extensions (+14 days, +30 days) immediately push back expiry dates.
+  * Lifetime VIP free flag (`is_lifetime_free = true`) permanently exempts designated merchants from all expiration notices and lockouts.
 
 ---
 
