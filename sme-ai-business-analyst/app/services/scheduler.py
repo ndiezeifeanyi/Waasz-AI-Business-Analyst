@@ -405,7 +405,7 @@ class ReportScheduler:
         )
         self.scheduler.add_job(
             self.run_daily_unified_reports,
-            CronTrigger(hour=settings.daily_report_hour_local),
+            CronTrigger(hour=settings.daily_report_hour_local, minute=0, timezone=settings.local_timezone),
             id="dispatch_daily_unified_reports",
             replace_existing=True,
         )
@@ -414,6 +414,8 @@ class ReportScheduler:
             CronTrigger(
                 day_of_week=settings.weekly_report_weekday,
                 hour=settings.daily_report_hour_local,
+                minute=0,
+                timezone=settings.local_timezone,
             ),
             id="dispatch_weekly_unified_reports",
             replace_existing=True,
@@ -423,6 +425,8 @@ class ReportScheduler:
             CronTrigger(
                 day=1,
                 hour=settings.daily_report_hour_local,
+                minute=0,
+                timezone=settings.local_timezone,
             ),
             id="dispatch_monthly_unified_reports",
             replace_existing=True,
@@ -432,6 +436,8 @@ class ReportScheduler:
             CronTrigger(
                 day=1,
                 hour=settings.daily_report_hour_local,
+                minute=0,
+                timezone=settings.local_timezone,
             ),
             id="dispatch_monthly_google_drive_backups",
             replace_existing=True,
@@ -442,6 +448,8 @@ class ReportScheduler:
                 month="1,4,7,10",
                 day=1,
                 hour=settings.daily_report_hour_local,
+                minute=0,
+                timezone=settings.local_timezone,
             ),
             id="dispatch_quarterly_unified_reports",
             replace_existing=True,
@@ -452,6 +460,8 @@ class ReportScheduler:
                 month=1,
                 day=1,
                 hour=settings.daily_report_hour_local,
+                minute=0,
+                timezone=settings.local_timezone,
             ),
             id="dispatch_yearly_unified_reports",
             replace_existing=True,

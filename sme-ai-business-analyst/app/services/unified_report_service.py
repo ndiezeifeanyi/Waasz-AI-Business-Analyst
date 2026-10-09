@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+import asyncio
 import inspect
 import logging
 import re
@@ -439,20 +440,30 @@ class UnifiedReportService:
         cadence: ReportCadence = "weekly",
     ) -> int:
         """
-        Scheduled job: Iterates over all active users and delivers their personalized reports.
+        Scheduled job: Concurrently generates and delivers personalized reports for all active users.
+        Uses a semaphore to balance speed (under 1 minute) without overloading AI providers or DB pools.
         """
         users_res = await db.execute(
-            select(User).where(User.is_active == True, User.deleted_at.is_(None))
+            select(User.id).where(User.is_active == True, User.deleted_at.is_(None))
         )
-        users = users_res.scalars().all()
-        sent_count = 0
-        for u in users:
-            try:
-                res = await self.generate_and_deliver_report(db, u.id, cadence=cadence)
-                if res.get("status") == "sent":
-                    sent_count += 1
-            except Exception as exc:
-                logger.error("Failed to generate %s report for user %s: %s", cadence, u.id, exc)
+        user_ids = list(users_res.scalars().all())
+        if not user_ids:
+            return 0
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def _deliver_for_user(uid: UUID) -> bool:
+            async with semaphore:
+                try:
+                    async with async_session_factory() as session:
+                        res = await self.generate_and_deliver_report(session, uid, cadence=cadence)
+                        return res.get("status") == "sent"
+                except Exception as exc:
+                    logger.error("Failed to generate %s report for user %s: %s", cadence, uid, exc)
+                    return False
+
+        results = await asyncio.gather(*[_deliver_for_user(uid) for uid in user_ids])
+        sent_count = sum(1 for r in results if r)
         return sent_count
 
     async def _synthesize_report(
