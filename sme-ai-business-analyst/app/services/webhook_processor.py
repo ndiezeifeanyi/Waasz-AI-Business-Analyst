@@ -280,6 +280,32 @@ class WhatsAppWebhookProcessor:
 
             is_invite = bool(getattr(decision, "invite_code", None) or (decision.reason == "invite_code_claimed"))
             full_welcome = self._build_onboarding_intro_message(invite_verified=is_invite, referral_msg=ref_msg)
+
+            # Check if this initial message contains an actual question or advisory inquiry
+            raw_body = (parsed.body or "").strip()
+            lower_body = raw_body.lower()
+            is_question = (
+                "?" in raw_body
+                or any(lower_body.startswith(q) for q in (
+                    "how", "what", "why", "who", "when", "where", "can you", "could you", "tell me", "help me", "explain", "is it", "which", "advice", "advise"
+                ))
+                or any(q_word in lower_body for q_word in ("how to", "how do", "can you", "help me", "what is", "how can", "tips on", "advice on", "advise me"))
+                or any(w in lower_body for w in ("develo", "develop", "small scale", "business plan", "grow", "strategy"))
+            ) and not any(lower_body == g for g in ("hi", "hello", "hey", "start", "join", "ok", "yes", "test", "ping"))
+
+            if is_question:
+                try:
+                    advice_answer = await self.qa.answer(db, user, raw_body)
+                    full_welcome = (
+                        f"{full_welcome}\n\n"
+                        f"---\n"
+                        f"💡 *In response to your question:*\n"
+                        f"{advice_answer}\n\n"
+                        f"👉 *To set up your shop profile and receipts, what is the name of your shop or business?* (e.g. 'Emeka Stores')"
+                    )
+                except Exception as qa_err:
+                    logger.warning("Failed to generate QA answer on first message: %s", qa_err)
+
             send_result = await self.whatsapp.send_text(parsed.from_phone, full_welcome)
             await self.ledger.record_outbound_message(
                 db, business.id, parsed.from_phone, full_welcome, send_result, user_id=user.id
@@ -1217,6 +1243,19 @@ class WhatsAppWebhookProcessor:
 
         # 2. Stage: Awaiting Business Name
         if stage == "awaiting_business_name" or (business.is_provisional and business.name.startswith("WhatsApp Business ")):
+            # Guard against capturing user questions, queries, or greetings as their business name
+            is_query = (
+                "?" in raw_text
+                or any(lower_text.startswith(q) for q in (
+                    "how", "what", "why", "who", "when", "where", "can you", "could you", "tell me", "help me", "explain", "is it", "which", "advice", "advise"
+                ))
+                or any(q_word in lower_text for q_word in ("how to", "what's", "what is", "news", "today's news", "weather", "who made", "who created", "tell me about", "small scale"))
+                or lower_text in ("hi", "hello", "hey", "help", "menu", "info", "thanks", "thank you")
+            )
+            if is_query:
+                # Do NOT treat this as a shop name! Return None so the agent/QA answers their question!
+                return None
+
             shop_name = re.sub(
                 r"^(my\s+(shop|business|store|company)\s+(name\s+)?(is|:)?|it\s+is\s+|name\s*:\s*)",
                 "",
