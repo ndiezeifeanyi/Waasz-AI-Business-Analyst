@@ -446,7 +446,10 @@ class WhatsAppWebhookProcessor:
                         [(f"receipt_{confirmed_tx.id}", "📄 Send receipt")],
                     )
                 else:
-                    send_result = await self.whatsapp.send_text(parsed.from_phone, handled)
+                    if "Reply 1=Yes" in handled:
+                        send_result = await self.whatsapp.send_confirmation(parsed.from_phone, handled)
+                    else:
+                        send_result = await self.whatsapp.send_text(parsed.from_phone, handled)
 
                 outbound_text = msg_body if (confirmed_tx and confirmed_tx.transaction_type == "sale" and pending.status == "confirmed") else handled
                 await self.ledger.record_outbound_message(
@@ -1060,53 +1063,92 @@ class WhatsAppWebhookProcessor:
         if action == "cancel":
             return await self.confirmations.cancel(db, pending)
 
-        if getattr(pending, "status", None) == "needs_edit" and parsed.body:
-            # Check if user message is an unrelated command/intent (e.g. reminder, report, goal, QA)
-            inferred_intent = IntentRouter.classify(parsed.body)
-            unrelated_intents = {"reminder", "goal", "knowledge_store", "forget_me", "report"}
-            lower_body = parsed.body.lower()
-            has_edit_keyword = any(w in lower_body for w in ["change", "edit", "correct", "make it", "instead", "amount", "price", "quantity", "was", "actually", "naira", "ngn", "sold", "spent", "paid"])
-            if inferred_intent in unrelated_intents and not has_edit_keyword:
-                # Unrelated intent: user changed their mind and sent a new command, do not consume as an edit
-                return None
-
-            try:
-                validated_body = validate_extraction_input(parsed.body)
-            except SanitizationError:
-                return "Invalid input. Please describe your edit clearly (e.g. 'Change amount to 5000')."
-            corrected = await self.extractor.extract(
-                validated_body, db=db, business_id=pending.business_id
-            )
-            if corrected.record_type in {"sale", "expense"} and corrected.amount is None:
-                return "Please include the amount in Naira for this record (e.g. 'Change to 10 bags for ₦250,000')."
-            extraction = await self.ledger.create_ai_extraction(
-                db,
-                pending.business_id,
-                pending.source_message_id,
-                validated_body,
-                corrected,
-                status="succeeded" if not corrected.needs_clarification else "needs_clarification",
-                provider=self.extractor.last_provider,
-                model=self.extractor.last_model,
-                input_tokens=self.extractor.last_input_tokens,
-                output_tokens=self.extractor.last_output_tokens,
-                estimated_cost_usd=self.extractor.last_estimated_cost_usd,
-            )
-            pending.status = "corrected"
-            new_confirmation = await self.ledger.stage_record_for_confirmation(
-                db,
-                pending.business_id,
-                pending.source_message_id,
-                extraction,
-                corrected,
-                member_id=pending.member_id,
-            )
-            return new_confirmation.confirmation_text
-
         if action == "confirm":
             return await self.confirmations.confirm(db, pending)
+
         if action == "edit":
             return await self.confirmations.request_edit(pending)
+
+        is_in_edit_state = getattr(pending, "status", None) == "needs_edit"
+        is_pending_state = getattr(pending, "status", None) == "pending"
+
+        if (is_in_edit_state or is_pending_state) and parsed.body:
+            lower_body = (parsed.body or "").lower().strip()
+            inferred_intent = IntentRouter.classify(parsed.body)
+            unrelated_intents = {"reminder", "goal", "knowledge_store", "forget_me", "report"}
+            has_edit_keyword = any(
+                w in lower_body
+                for w in [
+                    "change", "edit", "correct", "make it", "instead", "amount", "price",
+                    "quantity", "was", "actually", "naira", "ngn", "sold", "spent", "paid",
+                    "not", "is", "items", "item", "set", "sets", "wrong", "mistake"
+                ]
+            )
+
+            ref_record = getattr(pending, "extracted_record", None) or {}
+            items_list = ref_record.get("items") or []
+            item_names = [it.get("item_name", "").lower() for it in items_list if it.get("item_name")]
+            if ref_record.get("item_name"):
+                item_names.append(ref_record["item_name"].lower())
+
+            mentions_staged_item = any(
+                any(token in lower_body for token in re.findall(r"\w+", name) if len(token) > 2)
+                for name in item_names
+            )
+
+            is_correction_intent = False
+            if is_in_edit_state:
+                if not (inferred_intent in unrelated_intents and not has_edit_keyword and not mentions_staged_item):
+                    is_correction_intent = True
+            elif is_pending_state:
+                if (has_edit_keyword and mentions_staged_item) or (mentions_staged_item and re.search(r"\d+", lower_body)):
+                    is_correction_intent = True
+
+            if is_correction_intent:
+                try:
+                    validated_body = validate_extraction_input(parsed.body)
+                except SanitizationError:
+                    return "Invalid input. Please describe your edit clearly (e.g. 'Ends and socket is 30,000')."
+
+                corrected = await self.extractor.apply_correction(
+                    ref_record,
+                    validated_body,
+                    db=db,
+                    business_id=pending.business_id,
+                )
+
+                if corrected.record_type in {"sale", "expense"} and corrected.amount is None and not corrected.items:
+                    return "Please include the amount in Naira for this record (e.g. 'Change to ₦30,000')."
+
+                extraction = await self.ledger.create_ai_extraction(
+                    db,
+                    pending.business_id,
+                    pending.source_message_id,
+                    validated_body,
+                    corrected,
+                    status="succeeded" if not corrected.needs_clarification else "needs_clarification",
+                    provider=self.extractor.last_provider,
+                    model=self.extractor.last_model,
+                    input_tokens=self.extractor.last_input_tokens,
+                    output_tokens=self.extractor.last_output_tokens,
+                    estimated_cost_usd=self.extractor.last_estimated_cost_usd,
+                )
+
+                # Stage the corrected record. Because pending is currently in ("pending", "needs_edit"),
+                # stage_record_for_confirmation will automatically cancel pending's previous transactions!
+                new_confirmation = await self.ledger.stage_record_for_confirmation(
+                    db,
+                    pending.business_id,
+                    pending.source_message_id,
+                    extraction,
+                    corrected,
+                    member_id=pending.member_id,
+                )
+                pending.status = "corrected"
+                pending.correction_text = validated_body
+
+                return new_confirmation.confirmation_text
+
         return None
 
     async def _try_handle_alarm_button(

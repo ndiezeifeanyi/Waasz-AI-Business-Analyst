@@ -1,3 +1,5 @@
+import json
+import logging
 import re
 from decimal import Decimal
 from uuid import UUID
@@ -5,10 +7,12 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import CostLimitExceeded
-from app.schemas.extraction import ExtractedRecord
+from app.schemas.extraction import ExtractedRecord, LineItemRecord
 from app.services.ai_client import AiClient
 from app.services.prompt_loader import render_prompt
 from app.utils.currency import parse_money_amount
+
+logger = logging.getLogger(__name__)
 
 UNIT_WORDS = {
     "bag",
@@ -143,6 +147,121 @@ class AiExtractionService:
             return record
         except Exception:
             return None
+
+    async def apply_correction(
+        self,
+        old_record: ExtractedRecord | dict,
+        correction_text: str,
+        *,
+        db: AsyncSession | None = None,
+        business_id: UUID | None = None,
+    ) -> ExtractedRecord:
+        """Apply user's correction to a pending single or multi-item extracted record."""
+        if isinstance(old_record, ExtractedRecord):
+            old_dict = old_record.model_dump(mode="json")
+        else:
+            old_dict = dict(old_record)
+
+        record_json_str = json.dumps(old_dict, ensure_ascii=False, indent=2, default=str)
+        system_prompt, user_prompt = render_prompt(
+            "correction",
+            record_json=record_json_str,
+            correction_text=correction_text,
+        )
+
+        try:
+            result = await self.ai_client.complete_json(
+                system_prompt,
+                user_prompt,
+                operation="correction",
+                db=db,
+                business_id=business_id,
+            )
+            if result and result.content:
+                corrected_rec = ExtractedRecord.model_validate(result.content)
+                if corrected_rec.items:
+                    corrected_rec.amount = sum(it.amount for it in corrected_rec.items)
+                self.last_provider = result.provider
+                self.last_model = result.model
+                self.last_input_tokens = result.input_tokens
+                self.last_output_tokens = result.output_tokens
+                self.last_estimated_cost_usd = result.estimated_cost_usd
+                return corrected_rec
+        except CostLimitExceeded:
+            raise
+        except Exception as exc:
+            logger.warning("AI correction failed, falling back to heuristic: %s", exc)
+
+        return self._heuristic_apply_correction(old_dict, correction_text)
+
+    def _heuristic_apply_correction(
+        self, old_dict: dict, correction_text: str
+    ) -> ExtractedRecord:
+        self.last_provider = "local_heuristic"
+        self.last_model = "local-correction-v1"
+        self.last_input_tokens = 0
+        self.last_output_tokens = 0
+        self.last_estimated_cost_usd = 0
+
+        record_type = old_dict.get("record_type") or "sale"
+        occurred_at_date = old_dict.get("occurred_at_date")
+        items_raw = old_dict.get("items") or []
+
+        if items_raw:
+            updated_items: list[LineItemRecord] = []
+            for it in items_raw:
+                if isinstance(it, dict):
+                    updated_items.append(LineItemRecord.model_validate(it))
+                elif isinstance(it, LineItemRecord):
+                    updated_items.append(it)
+
+            lines = [line.strip() for line in re.split(r"[\n;,]+", correction_text) if line.strip()]
+            for line in lines:
+                amt = parse_money_amount(line)
+                clean_line_lower = line.lower()
+                best_idx = None
+                best_score = 0
+                for idx, item in enumerate(updated_items):
+                    words = [w for w in re.findall(r"\w+", item.item_name.lower()) if len(w) > 2]
+                    score = sum(1 for w in words if w in clean_line_lower)
+                    if score > best_score:
+                        best_score = score
+                        best_idx = idx
+
+                if best_idx is not None and best_score > 0:
+                    target_item = updated_items[best_idx]
+                    if amt is not None:
+                        target_item.amount = Decimal(str(amt))
+                    m_name = re.match(r"^([a-zA-Z\s&]+?)\s+(?:is|na|was|cost)\b", line, re.IGNORECASE)
+                    if m_name:
+                        cand_name = m_name.group(1).strip()
+                        if len(cand_name) > 2 and cand_name.lower() not in {"the", "and", "it"}:
+                            target_item.item_name = cand_name
+
+            total_amt = sum(it.amount for it in updated_items)
+            return ExtractedRecord(
+                record_type=record_type,
+                item_name=f"{len(updated_items)} items batch",
+                amount=total_amt,
+                currency="NGN",
+                occurred_at_date=occurred_at_date,
+                items=updated_items,
+                confidence=0.85,
+                needs_clarification=False,
+            )
+
+        old_amt = old_dict.get("amount")
+        old_name = old_dict.get("item_name")
+        amt = parse_money_amount(correction_text) or old_amt
+        return ExtractedRecord(
+            record_type=record_type,
+            item_name=old_name,
+            amount=amt,
+            currency="NGN",
+            occurred_at_date=occurred_at_date,
+            confidence=0.80,
+            needs_clarification=False,
+        )
 
     def _extract_with_rules(self, text: str) -> ExtractedRecord:
         self.last_provider = "local_heuristic"

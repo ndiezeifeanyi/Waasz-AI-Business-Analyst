@@ -454,6 +454,11 @@ class AgentService:
             "  When the user sends a photo of a handwritten paper record, ledger page, receipt, invoice, or types a list containing multiple goods or services (from 2 up to 100 items):\n"
             "  * NEVER lump or collapse multiple distinct goods into a single generic transaction (e.g. NEVER record 'Automotive parts for ₦411,000' or 'Goods for ₦100,000'). Traders and business owners must see their individual goods, quantities, and individual prices in their ledger and stock records.\n"
             "  * Extract EVERY single line item individually with its exact item_name, quantity, unit, and individual line amount.\n"
+            "  * MATHEMATICAL RECONCILIATION WITH HANDWRITTEN TOTAL: Check if there is a written grand total or sum at the bottom of the ledger sheet or document (e.g. '411,000' at the bottom of the page). Sum up your extracted line items! If your line item sum differs from the handwritten total on the page, RECONCILE THEM: re-examine ambiguous handwritten digits (e.g., distinguishing 30,000 vs 43,000, 13,000 vs 26,000), check for scratched-out or corrected lines (use the final corrected figure, not the crossed-out one), and ensure each line's price is paired with the exact item on the same horizontal row. The sum of your items SHOULD reconcile with the merchant's written total.\n"
+            "  * UNDERSTAND MERCHANT LEDGER LAYOUT & NOTATIONS:\n"
+            "    - Far Left Column: Quantity and unit of goods bought/sold (e.g., '1 set', '1 pc', '2 pcs', '1'). 'set' represents 1 complete set/kit. Keep quantity as written (e.g., quantity: 1, unit: 'set').\n"
+            "    - Middle Column: Item/part name and specifications (e.g. 'up & down clutch', 'Oil filter hvc', 'Top gasket & oil filter', 'Ends & socket & seal', 'STD con' [standard connecting rod bearings], 'Shock pad', 'Tie rod ends', 'Ball joint', 'Back brake pad', 'Linkage', 'Pot', 'Steering Rack', 'Back shackle'). Suffix codes or annotations like '141', '3X', '2B', '2W', '1R', 'M&O' are part codes or notes, NEVER quantities or multipliers! Do not invent high quantities like 8 pcs or 3 pcs from part codes.\n"
+            "    - Rightmost Column: The monetary price in Naira (NGN) for that specific line item. Trace across the row carefully to align the correct name with the correct price.\n"
             "  * If a date is written on the paper/document (e.g. '30/9/026' or '30/09/2026' -> '2026-09-30'), extract it and pass it to `occurred_at_date`.\n"
             "  * ALWAYS call the `record_batch_transactions` tool with all line items in the list.\n"
             "- SINGLE-ITEM RECEIPT / EXPENSE: When the photo or message contains only 1 single good or expense, call `record_transaction` with the specific item name, amount, and occurred_at_date if written.\n"
@@ -591,17 +596,24 @@ class AgentService:
         if pending_conf and getattr(pending_conf, "extracted_record", None):
             rec = pending_conf.extracted_record
             rec_type = rec.get("record_type", "record")
-            rec_item = rec.get("item_name") or "record"
             rec_amt = rec.get("amount") or 0
+            items_list = rec.get("items") or []
             try:
                 amt_float = float(rec_amt)
                 amt_str = f"₦{amt_float:,.0f}"
             except (ValueError, TypeError):
                 amt_str = f"₦{rec_amt}"
+
+            if items_list:
+                items_summary = "; ".join(f"{it.get('item_name')} (₦{float(it.get('amount') or 0):,.0f})" for it in items_list[:20])
+                batch_desc = f"Batch of {len(items_list)} {rec_type}s totaling {amt_str}: [{items_summary}]"
+            else:
+                batch_desc = f"{rec.get('item_name') or 'record'} for {amt_str}"
+
             system_prompt += (
-                f"\n### PENDING CONFIRMATION (INFORMATIONAL BACKGROUND REFERENCE ONLY - DO NOT PROACTIVELY BRING UP):\n"
-                f"- An unconfirmed {rec_type} is currently staged: {rec_item} for {amt_str}.\n"
-                f"Note: This is informational context only. Respond ONLY to what the user just said. Do not proactively ask the user to confirm or resolve this unless their current message is clearly about it.\n"
+                f"\n### CURRENT PENDING CONFIRMATION AWAITING USER CONFIRMATION OR CORRECTION:\n"
+                f"- Staged record: {batch_desc} (Status: {pending_conf.status}).\n"
+                f"Note: If the user refers to, corrects, or discusses these staged goods or prices, understand their intent clearly in context of this staged record.\n"
             )
 
         if memories:

@@ -15,7 +15,20 @@ from app.schemas.extraction import ExtractedRecord
 from app.utils.currency import format_naira
 
 CONFIRM_REPLY_IDS = {"1", "yes", "y", "confirm", "confirmed", "ok", "okay", "correct"}
-EDIT_REPLY_IDS = {"2", "edit", "change", "no", "n"}
+EDIT_REPLY_IDS = {
+    "2",
+    "edit",
+    "change",
+    "no",
+    "n",
+    "wrong",
+    "mistake",
+    "incorrect",
+    "modify",
+    "not correct",
+    "wait",
+    "hold on",
+}
 CANCEL_REPLY_IDS = {"3", "cancel", "stop", "abort", "dismiss", "nevermind", "never mind", "ignore", "discard"}
 
 
@@ -251,9 +264,16 @@ class ConfirmationService:
     async def request_edit(self, confirmation: Confirmation) -> str:
         confirmation.status = "needs_edit"
         confirmation.attempts += 1
+        rec = confirmation.extracted_record or {}
+        items = rec.get("items") or []
+        if items and len(items) > 1:
+            return (
+                "No wahala. Type what needs to be changed (e.g. 'Ends and socket is 30,000' or 'Shock pad is 26,000'). "
+                "I will update those items and keep the rest."
+            )
         return (
             "No wahala. Please type the corrected record in one message, e.g. "
-            "Sold 5 bags rice for ₦250000."
+            "Sold 5 bags rice for ₦250000 or Change price to ₦5000."
         )
 
     async def cancel(self, db: AsyncSession, confirmation: Confirmation) -> str:
