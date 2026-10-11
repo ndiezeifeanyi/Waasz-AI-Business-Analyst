@@ -91,6 +91,53 @@
             gap: 2px;
         }
 
+        .header-controls {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .export-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-export {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 13px;
+            font-size: 13px;
+            font-weight: 600;
+            border-radius: 9px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            border: 1px solid var(--border);
+            background: white;
+            color: var(--text-main);
+        }
+
+        .btn-export:hover {
+            background: #f1f5f9;
+            transform: translateY(-1px);
+        }
+
+        .btn-export-pdf {
+            background: #1e3a8a;
+            color: white;
+            border: 1px solid #1e3a8a;
+            box-shadow: 0 2px 4px rgba(30, 58, 138, 0.2);
+        }
+
+        .btn-export-pdf:hover {
+            background: #1d4ed8;
+            color: white;
+            box-shadow: 0 4px 8px rgba(30, 58, 138, 0.3);
+        }
+
         .period-btn {
             border: none;
             background: transparent;
@@ -259,11 +306,21 @@
                     <div class="dashboard-subtitle">Live Interactive Business Dashboard</div>
                 </div>
             </div>
-            <div class="period-selector">
-                <button class="period-btn" onclick="switchPeriod(7, this)">7D</button>
-                <button class="period-btn active" onclick="switchPeriod(30, this)">30D</button>
-                <button class="period-btn" onclick="switchPeriod(90, this)">90D</button>
-                <button class="period-btn" onclick="switchPeriod(365, this)">1Y</button>
+            <div class="header-controls">
+                <div class="period-selector">
+                    <button class="period-btn" onclick="switchPeriod(7, this)">7D</button>
+                    <button class="period-btn active" onclick="switchPeriod(30, this)">30D</button>
+                    <button class="period-btn" onclick="switchPeriod(90, this)">90D</button>
+                    <button class="period-btn" onclick="switchPeriod(365, this)">1Y</button>
+                </div>
+                <div class="export-group">
+                    <button class="btn-export" onclick="downloadCSV()" title="Download confirmed transactions as CSV">
+                        📥 Download CSV
+                    </button>
+                    <button class="btn-export btn-export-pdf" onclick="downloadStatement()" title="Download official statement PDF for loan / bank review">
+                        🏦 Loan Statement (PDF)
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -473,6 +530,14 @@
             document.querySelectorAll(".period-btn").forEach(b => b.classList.remove("active"));
             btn.classList.add("active");
             loadDashboardData(days);
+        }
+
+        function downloadCSV() {
+            window.location.href = `/reports/export/csv/${token}?days=${currentDays}`;
+        }
+
+        function downloadStatement() {
+            window.location.href = `/reports/export/statement/${token}?days=${currentDays}`;
         }
 
         // Initial load

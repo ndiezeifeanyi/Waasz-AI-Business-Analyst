@@ -815,6 +815,73 @@ class WhatsAppWebhookProcessor:
             except Exception as e:
                 logger.warning("Could not save logo: %s", e)
 
+        # Check for statement / loan / data export commands
+        statement_keywords = (
+            "download statement", "send statement", "statement", "get statement",
+            "account statement", "financial statement", "loan statement", "bank statement",
+            "export my data", "export data", "download data", "send my data", "download my data",
+            "business statement", "my statement"
+        )
+        is_statement_cmd = (
+            any(lower_text == kw or lower_text.startswith(kw) for kw in statement_keywords)
+            or any(kw in lower_text for kw in (
+                "download statement", "send statement", "loan statement", "account statement",
+                "bank statement", "export my data", "export data", "download my data", "download data",
+                "financial statement", "business statement"
+            ))
+            or (
+                "statement" in lower_text
+                and any(w in lower_text for w in ("download", "send", "get", "need", "want", "loan", "pdf", "export", "give"))
+            )
+        )
+        if is_statement_cmd:
+            try:
+                from app.services.receipt_service import ReceiptService
+                receipt_svc = ReceiptService()
+                pdf_bytes, filename, summary = await receipt_svc.generate_statement_pdf(db, business.id, days=30)
+                
+                caption = f"📄 Official Statement of Business Activity - {business.name}"
+                send_res = await self.whatsapp.send_document_bytes(
+                    parsed.from_phone,
+                    pdf_bytes,
+                    filename=filename,
+                    caption=caption,
+                )
+                await self.ledger.record_outbound_message(
+                    db, business.id, parsed.from_phone, f"[Sent document {filename}]", send_res, user_id=user.id
+                )
+
+                summary_text = (
+                    f"📑 *Official Financial Statement Generated!*\n\n"
+                    f"Store: *{business.name}*\n"
+                    f"Period: *Last 30 Days*\n\n"
+                    f"💰 *Total Sales:* ₦{summary['total_sales']:,.0f} ({summary['sales_count']} sales)\n"
+                    f"💸 *Total Expenses:* ₦{summary['total_expenses']:,.0f} ({summary['expense_count']} expenses)\n"
+                    f"📈 *Net Profit:* ₦{summary['net_profit']:,.0f}\n"
+                    f"🤝 *Pending Receivables:* ₦{summary['total_receivables']:,.0f}\n\n"
+                    "Your official PDF statement is attached above. You can present it to microfinance banks, cooperatives, or loan officers."
+                )
+                text_res = await self.whatsapp.send_text(parsed.from_phone, summary_text)
+                await self.ledger.record_outbound_message(
+                    db, business.id, parsed.from_phone, summary_text, text_res, user_id=user.id
+                )
+                inbound.status = "processed"
+                if hasattr(db, "commit"):
+                    await db.commit()
+                return
+            except Exception as exc:
+                logger.error("Failed to generate statement: %s", exc)
+                fail_msg = "⚠️ I could not compile your statement right now. Please ensure you have recorded confirmed sales or expenses first."
+                send_res = await self.whatsapp.send_text(parsed.from_phone, fail_msg)
+                try:
+                    await self.ledger.record_outbound_message(db, getattr(business, "id", None), parsed.from_phone, fail_msg, send_res, user_id=getattr(user, "id", None))
+                except Exception:
+                    pass
+                inbound.status = "processed"
+                if hasattr(db, "commit"):
+                    await db.commit()
+                return
+
         # Check for report commands
         if "weekly report" in lower_text or "send report" in lower_text:
             from app.services.report_delivery import ReportDeliveryService
@@ -1243,14 +1310,41 @@ class WhatsAppWebhookProcessor:
 
         # 2. Stage: Awaiting Business Name
         if stage == "awaiting_business_name" or (business.is_provisional and business.name.startswith("WhatsApp Business ")):
-            # Guard against capturing user questions, queries, or greetings as their business name
+            # Guard against capturing user greetings, questions, or acknowledgements as their business name
+            common_greetings = {
+                "hafa", "howfar", "how far", "how fa", "how body", "how na", "wetin", "wetin dey", "wetin sup",
+                "hi", "hello", "hey", "heyy", "heya", "holla", "yo", "yoo", "sup", "wassup", "what's up", "whats up",
+                "kedu", "keduna", "ndewo", "bawo", "ekaro", "ekasan", "ekale", "sannu", "ina kwana", "ina wuni",
+                "good morning", "good afternoon", "good evening", "good day", "morning", "afternoon", "evening",
+                "gm", "ga", "ge", "boss", "chief", "bro", "bros", "broski", "yes", "yeah", "ok", "okay", "alright",
+                "ready", "done", "help", "menu", "info", "thanks", "thank you",
+            }
+            clean_word = re.sub(r"[^\w\s]", "", lower_text).strip()
+            is_greeting = (
+                clean_word in common_greetings
+                or any(clean_word.startswith(g + " ") for g in ("hafa", "how far", "howfar", "kedu", "bawo", "sannu", "hi", "hello", "hey", "good morning", "good evening", "good afternoon"))
+            )
+            if is_greeting:
+                greeting_reply = "Hafa! 👋" if any(g in clean_word for g in ("hafa", "how far", "howfar", "wetin")) else "Hello! 👋"
+                return (
+                    f"{greeting_reply} Welcome to Waasz.\n\n"
+                    "What is the official name of your shop or business? (e.g. *'Emeka Provisions'* or *'Mama Joy Kitchen'*)"
+                )
+
+            # Guard against capturing user queries, questions, or conversational requests as their business name
             is_query = (
                 "?" in raw_text
-                or any(lower_text.startswith(q) for q in (
-                    "how", "what", "why", "who", "when", "where", "can you", "could you", "tell me", "help me", "explain", "is it", "which", "advice", "advise"
+                or any(re.search(p, lower_text) for p in (
+                    r"\b(pls|please)\b",
+                    r"\b(can|could|would|will)\s+(you|u)\b",
+                    r"\b(how|what|why|who|when|where|which)\b",
+                    r"\b(tell|give|show|recommend|suggest|explain|list|help)\s+(me|us|u)?\b",
+                    r"\b(i\s+want|i\s+need|i\s+am|i'm|im)\b",
+                    r"\b(do\s+you|are\s+you)\b",
+                    r"\b(novel|book|movie|song|music|news|weather|joke)\b",
                 ))
-                or any(q_word in lower_text for q_word in ("how to", "what's", "what is", "news", "today's news", "weather", "who made", "who created", "tell me about", "small scale"))
-                or lower_text in ("hi", "hello", "hey", "help", "menu", "info", "thanks", "thank you")
+                or len(raw_text.split()) > 5
+                or len(raw_text) > 40
             )
             if is_query:
                 # Do NOT treat this as a shop name! Return None so the agent/QA answers their question!
@@ -1263,7 +1357,7 @@ class WhatsAppWebhookProcessor:
                 flags=re.IGNORECASE,
             ).strip().strip("\"'").strip()
 
-            if not shop_name or len(shop_name) < 2:
+            if not shop_name or len(shop_name) < 2 or len(shop_name.split()) > 5 or len(shop_name) > 40:
                 return None
 
             business.name = shop_name
@@ -1299,17 +1393,33 @@ class WhatsAppWebhookProcessor:
 
         # 3. Stage: Awaiting Receipt Details (Address / Bank info)
         if stage == "awaiting_receipt_details":
-            new_settings = dict(settings_dict)
-            new_settings["onboarding_stage"] = "completed"
-            business.settings = new_settings
-
             if lower_text in ("skip", "later", "no", "not now", "next", "pass"):
+                new_settings = dict(settings_dict)
+                new_settings["onboarding_stage"] = "completed"
+                business.settings = new_settings
                 await db.flush()
                 return (
                     f"✅ All set! You're ready to start tracking *{business.name}*.\n\n"
                     "Try logging your first sale right now:\n"
                     "👉 Text or voice note: *\"Sold 3 bags of rice for ₦150,000 cash\"*"
                 )
+
+            # Guard against capturing user questions or general chat as store address/bank details
+            is_query = (
+                "?" in raw_text
+                or any(re.search(p, lower_text) for p in (
+                    r"\b(pls|please)\b",
+                    r"\b(can|could|would|will)\s+(you|u)\b",
+                    r"\b(how|what|why|who|when|where|which)\b",
+                    r"\b(tell|give|show|recommend|suggest|explain|list|help)\b",
+                ))
+            )
+            if is_query:
+                return None
+
+            new_settings = dict(settings_dict)
+            new_settings["onboarding_stage"] = "completed"
+            business.settings = new_settings
 
             from app.models.receipt_template import ReceiptTemplate
             tmpl_stmt = select(ReceiptTemplate).where(ReceiptTemplate.business_id == business.id).limit(1)

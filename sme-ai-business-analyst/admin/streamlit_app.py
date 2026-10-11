@@ -636,39 +636,93 @@ with tab_broadcast:
 
 with tab_export:
     st.subheader("📥 One-Click Data & Ledger Exporter")
-    st.caption("Download comprehensive business ledgers, customer records, debts, and message audits as CSV files.")
+    st.caption("Download comprehensive business ledgers, customer records, debts, and message audits as CSV or official PDF statements.")
+
+    if selected_business_id:
+        biz_name = labels.get(selected_business_id, "Selected Business").split(" (")[0]
+        clean_slug = "".join(c for c in biz_name.lower().replace(" ", "_") if c.isalnum() or c == "_")[:20]
+        st.info(f"🎯 **Filtered Mode Active:** Currently exporting isolated records for **{biz_name}** only.")
+        tx_query = "select * from transactions where business_id = %s order by created_at desc"
+        debts_query = "select * from debts where business_id = %s order by created_at desc"
+        inv_query = "select * from inventory_items where business_id = %s order by created_at desc"
+        q_params = (selected_business_id,)
+        file_prefix = f"{clean_slug}_"
+    else:
+        st.info("🌐 **Global Mode:** Currently exporting all records across the platform. (Use the **Business** dropdown on the left to isolate a single merchant).")
+        tx_query = "select * from transactions order by created_at desc"
+        debts_query = "select * from debts order by created_at desc"
+        inv_query = "select * from inventory_items order by created_at desc"
+        q_params = ()
+        file_prefix = ""
 
     c_exp1, c_exp2 = st.columns(2)
     with c_exp1:
         st.write("#### 📊 Financial & Ledger Data")
-        tx_export_df = query_df("select * from transactions order by created_at desc")
+        tx_export_df = query_df(tx_query, q_params)
         if not tx_export_df.empty:
             st.download_button(
-                label="📄 Download All Transactions (CSV)",
+                label=f"📄 Download {'Filtered ' if selected_business_id else 'All '}Transactions (CSV)",
                 data=tx_export_df.to_csv(index=False),
-                file_name="transactions_export.csv",
+                file_name=f"{file_prefix}transactions.csv",
                 mime="text/csv",
+                key="btn_dl_tx",
             )
         else:
             st.info("No transactions to export yet.")
 
-        debts_export_df = query_df("select * from debts order by created_at desc")
+        debts_export_df = query_df(debts_query, q_params)
         if not debts_export_df.empty:
             st.download_button(
-                label="📑 Download Customer Debts & Credit (CSV)",
+                label=f"📑 Download {'Filtered ' if selected_business_id else 'Customer '}Debts & Credit (CSV)",
                 data=debts_export_df.to_csv(index=False),
-                file_name="debts_export.csv",
+                file_name=f"{file_prefix}debts.csv",
                 mime="text/csv",
+                key="btn_dl_debts",
             )
 
-        inv_export_df = query_df("select * from inventory_items order by created_at desc")
+        inv_export_df = query_df(inv_query, q_params)
         if not inv_export_df.empty:
             st.download_button(
-                label="📦 Download Inventory & Stock (CSV)",
+                label=f"📦 Download {'Filtered ' if selected_business_id else 'All '}Inventory & Stock (CSV)",
                 data=inv_export_df.to_csv(index=False),
-                file_name="inventory_export.csv",
+                file_name=f"{file_prefix}inventory.csv",
                 mime="text/csv",
+                key="btn_dl_inv",
             )
+
+        if selected_business_id:
+            st.write("---")
+            st.write("#### 📑 Official Loan / Bank Statement")
+            st.caption(f"Compiled PDF ledger certified for loan applications & bank review for {biz_name}.")
+            try:
+                import asyncio
+                import concurrent.futures
+                from uuid import UUID
+                from app.core.database import async_session_factory
+                from app.services.receipt_service import ReceiptService
+
+                async def get_stmt():
+                    async with async_session_factory() as db:
+                        r_svc = ReceiptService()
+                        return await r_svc.generate_statement_pdf(db, UUID(selected_business_id), days=30)
+
+                def run_async_safe(coro):
+                    try:
+                        return asyncio.run(coro)
+                    except RuntimeError:
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            return pool.submit(asyncio.run, coro).result()
+
+                pdf_bytes, pdf_filename, pdf_summary = run_async_safe(get_stmt())
+                st.download_button(
+                    label=f"🏦 Download Certified Statement (PDF) — {biz_name}",
+                    data=pdf_bytes,
+                    file_name=pdf_filename,
+                    mime="application/pdf",
+                    key="btn_dl_stmt_pdf",
+                )
+            except Exception as e:
+                st.warning(f"Could not prepare PDF statement: {e}")
 
     with c_exp2:
         st.write("#### 👥 Users & System Audits")

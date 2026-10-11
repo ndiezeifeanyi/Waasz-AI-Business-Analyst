@@ -152,13 +152,29 @@ class InactivityNudgeService:
                     ],
                 }
             ]
+            # Try en_US (which matches Meta registration), fallback to en if needed
             send_res = await self.whatsapp.send_template(
                 user.phone_number,
                 template_name=UTILITY_TEMPLATE_NAME,
-                language_code="en",
+                language_code="en_US",
                 components=template_components,
             )
+            if not send_res.success:
+                send_res = await self.whatsapp.send_template(
+                    user.phone_number,
+                    template_name=UTILITY_TEMPLATE_NAME,
+                    language_code="en",
+                    components=template_components,
+                )
             outbound_text = f"[Template: {UTILITY_TEMPLATE_NAME}] {DEFAULT_NUDGE_TEXT}"
+            
+            # Fallback: If template is not yet approved or fails on Meta, fallback to freeform text
+            if not send_res.success:
+                logger.warning("Template send failed for user %s (%s). Falling back to send_text.", user.id, send_res.error_message)
+                fallback_res = await self.whatsapp.send_text(user.phone_number, DEFAULT_NUDGE_TEXT)
+                if fallback_res.success:
+                    send_res = fallback_res
+                    outbound_text = DEFAULT_NUDGE_TEXT
 
         if user.business_id:
             await self.ledger.record_outbound_message(

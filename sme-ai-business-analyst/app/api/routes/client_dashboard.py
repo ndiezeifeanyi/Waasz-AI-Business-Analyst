@@ -90,3 +90,99 @@ async def get_dashboard_data(
             for d in raw_data
         ],
     }
+
+
+@router.get("/export/csv/{token}")
+async def export_dashboard_csv(
+    token: str,
+    days: int = Query(default=30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db_session),
+    magic_links: MagicLinkService = Depends(),
+):
+    import csv
+    import io
+    from datetime import UTC, datetime, timedelta
+    from fastapi.responses import Response
+    from sqlalchemy import select
+    from app.models.transaction import Transaction
+
+    business_id = await magic_links.validate_token(db, token)
+    if not business_id:
+        raise HTTPException(status_code=403, detail="Invalid or expired link")
+
+    business = await db.get(Business, business_id)
+    business_name = business.name if business else "Business"
+    clean_name = "".join(c for c in business_name.lower().replace(" ", "_") if c.isalnum() or c == "_")[:20]
+
+    since_date = datetime.now(UTC) - timedelta(days=days)
+    stmt = (
+        select(Transaction)
+        .where(
+            Transaction.business_id == business_id,
+            Transaction.status == "confirmed",
+            Transaction.occurred_at >= since_date,
+        )
+        .order_by(Transaction.occurred_at.desc())
+    )
+    res = await db.execute(stmt)
+    txs = list(res.scalars().all())
+
+    if not txs:
+        stmt_fb = (
+            select(Transaction)
+            .where(
+                Transaction.business_id == business_id,
+                Transaction.status == "confirmed",
+            )
+            .order_by(Transaction.occurred_at.desc())
+            .limit(100)
+        )
+        res_fb = await db.execute(stmt_fb)
+        txs = list(res_fb.scalars().all())
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Date", "Type", "Item / Description", "Amount (NGN)", "Status", "Credit", "Reference ID"])
+    for t in txs:
+        date_str = t.occurred_at.strftime("%Y-%m-%d %H:%M") if t.occurred_at else ""
+        desc = t.item_name or t.description or "General"
+        writer.writerow([
+            date_str,
+            t.transaction_type.capitalize() if t.transaction_type else "Sale",
+            desc,
+            float(t.amount or 0),
+            t.status,
+            "Yes" if t.is_credit else "No",
+            str(t.id)[:8],
+        ])
+
+    csv_data = output.getvalue()
+    filename = f"{clean_name}_transactions_{datetime.now(UTC).strftime('%Y%m%d')}.csv"
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/export/statement/{token}")
+async def export_dashboard_statement(
+    token: str,
+    days: int = Query(default=30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db_session),
+    magic_links: MagicLinkService = Depends(),
+):
+    from fastapi.responses import Response
+    from app.services.receipt_service import ReceiptService
+
+    business_id = await magic_links.validate_token(db, token)
+    if not business_id:
+        raise HTTPException(status_code=403, detail="Invalid or expired link")
+
+    receipt_service = ReceiptService()
+    pdf_bytes, filename, _ = await receipt_service.generate_statement_pdf(db, business_id, days=days)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
