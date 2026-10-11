@@ -130,6 +130,7 @@ async def test_end_to_end_batch_staging_and_confirmation():
             inbound_msg.id,
             extraction,
             record,
+            source_wamid=parsed_inbound.message_id,
         )
         await db.commit()
 
@@ -147,10 +148,12 @@ async def test_end_to_end_batch_staging_and_confirmation():
         txs = tx_res.scalars().all()
         assert len(txs) == 18
 
-        # First transaction links confirmation_id, rest do not violate unique constraint
+        # First transaction links confirmation_id and source_wamid, rest do not violate unique constraint
         assert txs[0].confirmation_id == confirmation.id
+        assert txs[0].source_wamid == parsed_inbound.message_id
         for i in range(1, 18):
             assert txs[i].confirmation_id is None
+            assert txs[i].source_wamid is None
             assert txs[i].ai_extraction_id == confirmation.ai_extraction_id
 
         # Check date parsed correctly

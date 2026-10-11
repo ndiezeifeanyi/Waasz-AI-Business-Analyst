@@ -492,7 +492,7 @@ class LedgerService:
                             ai_extraction_id=extraction.id,
                             source_message_id=source_message_id,
                             created_by_member_id=member_id,
-                            source_wamid=source_wamid,
+                            source_wamid=source_wamid if idx == 0 else None,
                             transaction_type=record.record_type,
                             item_name=it.item_name,
                             description=it.description or record.description,
