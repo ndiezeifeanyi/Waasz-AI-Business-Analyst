@@ -28,6 +28,39 @@ from app.schemas.whatsapp import ParsedWhatsAppMessage, WhatsAppSendResult
 from app.services.confirmation_service import build_confirmation_text
 from app.utils.phone import normalize_phone
 
+def parse_occurred_at_date(date_str: str | None) -> datetime:
+    now_utc = datetime.now(UTC)
+    if not date_str or not str(date_str).strip():
+        return now_utc
+
+    raw = str(date_str).strip()
+    import re
+    m = re.match(r"^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$", raw)
+    if m:
+        p1, p2, p3 = m.groups()
+        try:
+            if len(p1) == 4:  # YYYY-MM-DD
+                year, month, day = int(p1), int(p2), int(p3)
+            else:  # DD-MM-YYYY or DD-MM-YY
+                day, month = int(p1), int(p2)
+                year = int(p3)
+                if year < 100:
+                    year += 2000
+                elif year < 1000:  # e.g. 026 -> 2026
+                    year += 2000
+            return datetime(year, month, day, now_utc.hour, now_utc.minute, now_utc.second, tzinfo=UTC)
+        except Exception:
+            pass
+
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%Y/%m/%d", "%d-%m-%Y"):
+        try:
+            d = datetime.strptime(raw, fmt)
+            return datetime(d.year, d.month, d.day, now_utc.hour, now_utc.minute, now_utc.second, tzinfo=UTC)
+        except ValueError:
+            pass
+
+    return now_utc
+
 
 class LedgerService:
     async def create_webhook_event(self, db: AsyncSession, payload: dict) -> WebhookEvent:
@@ -390,7 +423,8 @@ class LedgerService:
             prev_txs = (
                 await db.execute(
                     select(Transaction).where(
-                        Transaction.confirmation_id == prev.id,
+                        (Transaction.confirmation_id == prev.id)
+                        | (Transaction.ai_extraction_id == prev.ai_extraction_id),
                         Transaction.status == "pending_confirmation",
                     )
                 )
@@ -424,50 +458,102 @@ class LedgerService:
         await db.flush()
 
         if record.record_type in {"sale", "expense"}:
-            customer_id = None
-            if record.record_type == "sale" and record.customer_name:
-                cust_name = record.customer_name.strip()
-                norm_name = cust_name.lower()
-                cust_res = await db.execute(
-                    select(Customer).where(
-                        Customer.business_id == business_id,
-                        Customer.normalized_name == norm_name,
-                    ).limit(1)
-                )
-                customer = cust_res.scalar_one_or_none()
-                if not customer:
-                    customer = Customer(
-                        id=uuid4(),
-                        business_id=business_id,
-                        created_by_member_id=member_id,
-                        name=cust_name,
-                        normalized_name=norm_name,
-                    )
-                    db.add(customer)
-                    await db.flush()
-                customer_id = customer.id
+            occurred_dt = parse_occurred_at_date(record.occurred_at_date)
+            if record.items and len(record.items) > 0:
+                for idx, it in enumerate(record.items):
+                    item_cust_id = None
+                    cust_name = it.customer_name or record.customer_name
+                    if record.record_type == "sale" and cust_name:
+                        c_name = cust_name.strip()
+                        n_name = c_name.lower()
+                        cust_res = await db.execute(
+                            select(Customer).where(
+                                Customer.business_id == business_id,
+                                Customer.normalized_name == n_name,
+                            ).limit(1)
+                        )
+                        cust = cust_res.scalar_one_or_none()
+                        if not cust:
+                            cust = Customer(
+                                id=uuid4(),
+                                business_id=business_id,
+                                created_by_member_id=member_id,
+                                name=c_name,
+                                normalized_name=n_name,
+                            )
+                            db.add(cust)
+                            await db.flush()
+                        item_cust_id = cust.id
 
-            db.add(
-                Transaction(
-                    business_id=business_id,
-                    confirmation_id=confirmation.id,
-                    ai_extraction_id=extraction.id,
-                    source_message_id=source_message_id,
-                    created_by_member_id=member_id,
-                    source_wamid=source_wamid,
-                    transaction_type=record.record_type,
-                    item_name=record.item_name,
-                    description=record.description,
-                    quantity=record.quantity,
-                    unit=record.unit,
-                    unit_price=record.unit_price,
-                    amount=record.amount,
-                    currency=record.currency,
-                    status="pending_confirmation",
-                    is_credit=record.is_credit,
-                    customer_id=customer_id,
+                    db.add(
+                        Transaction(
+                            business_id=business_id,
+                            confirmation_id=confirmation.id if idx == 0 else None,
+                            ai_extraction_id=extraction.id,
+                            source_message_id=source_message_id,
+                            created_by_member_id=member_id,
+                            source_wamid=source_wamid,
+                            transaction_type=record.record_type,
+                            item_name=it.item_name,
+                            description=it.description or record.description,
+                            quantity=it.quantity,
+                            unit=it.unit or record.unit,
+                            unit_price=it.unit_price,
+                            amount=it.amount,
+                            currency=record.currency,
+                            status="pending_confirmation",
+                            is_credit=it.is_credit or record.is_credit,
+                            customer_id=item_cust_id,
+                            occurred_at=occurred_dt,
+                            extra_metadata={"batch_id": str(confirmation.id), "batch_index": idx},
+                        )
+                    )
+            else:
+                customer_id = None
+                if record.record_type == "sale" and record.customer_name:
+                    cust_name = record.customer_name.strip()
+                    norm_name = cust_name.lower()
+                    cust_res = await db.execute(
+                        select(Customer).where(
+                            Customer.business_id == business_id,
+                            Customer.normalized_name == norm_name,
+                        ).limit(1)
+                    )
+                    customer = cust_res.scalar_one_or_none()
+                    if not customer:
+                        customer = Customer(
+                            id=uuid4(),
+                            business_id=business_id,
+                            created_by_member_id=member_id,
+                            name=cust_name,
+                            normalized_name=norm_name,
+                        )
+                        db.add(customer)
+                        await db.flush()
+                    customer_id = customer.id
+
+                db.add(
+                    Transaction(
+                        business_id=business_id,
+                        confirmation_id=confirmation.id,
+                        ai_extraction_id=extraction.id,
+                        source_message_id=source_message_id,
+                        created_by_member_id=member_id,
+                        source_wamid=source_wamid,
+                        transaction_type=record.record_type,
+                        item_name=record.item_name,
+                        description=record.description,
+                        quantity=record.quantity,
+                        unit=record.unit,
+                        unit_price=record.unit_price,
+                        amount=record.amount,
+                        currency=record.currency,
+                        status="pending_confirmation",
+                        is_credit=record.is_credit,
+                        customer_id=customer_id,
+                        occurred_at=occurred_dt,
+                    )
                 )
-            )
         elif record.record_type == "inventory_update":
             db.add(
                 InventoryMovement(

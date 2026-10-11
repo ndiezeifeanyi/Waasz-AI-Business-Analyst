@@ -30,7 +30,7 @@ from app.models.inventory import InventoryItem
 from app.models.message import WhatsAppMessage
 from app.models.transaction import Transaction
 from app.models.user import User
-from app.schemas.extraction import ExtractedRecord
+from app.schemas.extraction import ExtractedRecord, LineItemRecord
 from app.services.ai_client import AiClient
 from app.services.ai_extraction import AiExtractionService
 from app.services.analytics_service import AI_ADVISORY_DISCLAIMER, AnalyticsService
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class RecordTransactionInput(BaseModel):
-    """Stage a sale or business expense into the ledger. The amount is strictly MANDATORY and must be a positive number in Naira (NGN). If the user states a sale or expense without an amount (e.g. 'Sold 10 bags of rice'), DO NOT call this tool — ask them for the amount first."""
+    """Stage a single sale or business expense into the ledger. The amount is strictly MANDATORY and must be a positive number in Naira (NGN). If the user states a sale or expense without an amount (e.g. 'Sold 10 bags of rice'), DO NOT call this tool — ask them for the amount first."""
     model_config = {"title": "record_transaction"}
     record_type: str = Field(description="Type of record: 'sale' (money in) or 'expense' (money out)")
     amount: float = Field(description="Numerical monetary value in Naira (NGN), e.g. 50000 for ₦50,000")
@@ -71,6 +71,29 @@ class RecordTransactionInput(BaseModel):
     is_credit: bool = Field(default=False, description="Set to True if this is a credit sale (customer bought on credit / owes money).")
     customer_name: str | None = Field(default=None, description="Name or identifier of the customer (required/recommended if is_credit is True).")
     due_date: str | None = Field(default=None, description="Optional repayment due date for credit sales (e.g. '2026-10-15' or ISO-8601 string).")
+    occurred_at_date: str | None = Field(default=None, description="Optional transaction date if written on receipt/paper, e.g. '2026-09-30' or '30/09/2026'.")
+
+
+class BatchLineItemInput(BaseModel):
+    item_name: str = Field(description="Exact name of the item, good, or service (e.g. 'Toyota Oil Filter', 'Spark plugs', 'Motor oil')")
+    quantity: float | None = Field(default=1.0, description="Numerical quantity sold or purchased")
+    unit: str | None = Field(default="item", description="Unit of measurement, e.g. 'pcs', 'litres', 'bags', 'cartons', 'units'")
+    unit_price: float | None = Field(default=None, description="Price per unit in Naira if indicated on paper/receipt")
+    amount: float = Field(description="Total monetary amount for this individual line item in Naira (NGN), e.g. 7000 for ₦7,000")
+    description: str | None = Field(default=None, description="Optional extra details for this item")
+    is_credit: bool = Field(default=False, description="Set to True if this line item was on credit")
+    customer_name: str | None = Field(default=None, description="Customer name if sold on credit")
+
+
+class RecordBatchTransactionsInput(BaseModel):
+    """Stage a batch of multiple goods or expenses from a paper list, receipt, invoice, or multi-item text/voice message into the ledger.
+    IMPORTANT: Use this tool whenever a document, photo, or message lists multiple distinct products or expenses (from 2 up to 100 items).
+    NEVER combine distinct goods into a single lumped transaction! Every individual item MUST be captured with its name, quantity, and individual amount."""
+    model_config = {"title": "record_batch_transactions"}
+    record_type: str = Field(description="Type of records: 'sale' (goods sold / money in) or 'expense' (goods bought / money out)")
+    items: list[BatchLineItemInput] = Field(description="List of line items extracted from the document or message (supports up to 100 items).")
+    occurred_at_date: str | None = Field(default=None, description="Date written on the paper/receipt if present, e.g. '2026-09-30' or '30/09/2026' or '30/9/026'.")
+    customer_name: str | None = Field(default=None, description="Optional general customer or vendor name for the batch.")
 
 
 class SetItemCostInput(BaseModel):
@@ -295,6 +318,7 @@ def get_agent_tools() -> list[type[BaseModel]]:
     """Return active agent tools, conditionally omitting image generation tools if disabled."""
     tools: list[type[BaseModel]] = [
         RecordTransactionInput,
+        RecordBatchTransactionsInput,
         SetItemCostInput,
         SetReorderThresholdInput,
         CorrectStockLevelInput,
@@ -425,8 +449,14 @@ class AgentService:
             "- AVOID ASTERISK CLUTTER: Use single *asterisks* for bold sparingly — never wrap entire lines, headings, or multiple nouns in asterisks.\n"
             "- CLEAN LISTS: When a list is genuinely needed, use a simple line-per-item with a single leading emoji or dash. Do NOT mix multiple competing bullet styles or wrap every line in bold.\n"
             "- SPACING & BREVITY: Use clean blank lines between paragraphs and sections for spacing. Keep replies to 1-3 sentences for general chat. Never output dense walls of asterisks, hyphens, or dividers.\n\n"
-            "### IMAGE & RECEIPT UNDERSTANDING:\n"
-            "- RECEIPT / INVOICE / EXPENSE: When the user sends an image of a paper receipt, bill, or invoice, extract the total, items, vendor, and call the `record_transaction` tool directly.\n"
+            "### IMAGE, PAPER RECEIPT & MULTI-ITEM DOCUMENT UNDERSTANDING:\n"
+            "- MULTI-ITEM LISTS / HANDWRITTEN PAPER / INVOICES (CRITICAL REQUIREMENT):\n"
+            "  When the user sends a photo of a handwritten paper record, ledger page, receipt, invoice, or types a list containing multiple goods or services (from 2 up to 100 items):\n"
+            "  * NEVER lump or collapse multiple distinct goods into a single generic transaction (e.g. NEVER record 'Automotive parts for ₦411,000' or 'Goods for ₦100,000'). Traders and business owners must see their individual goods, quantities, and individual prices in their ledger and stock records.\n"
+            "  * Extract EVERY single line item individually with its exact item_name, quantity, unit, and individual line amount.\n"
+            "  * If a date is written on the paper/document (e.g. '30/9/026' or '30/09/2026' -> '2026-09-30'), extract it and pass it to `occurred_at_date`.\n"
+            "  * ALWAYS call the `record_batch_transactions` tool with all line items in the list.\n"
+            "- SINGLE-ITEM RECEIPT / EXPENSE: When the photo or message contains only 1 single good or expense, call `record_transaction` with the specific item name, amount, and occurred_at_date if written.\n"
             "- GENERAL PHOTO / SCENE / OBJECT: When the user sends any general photo, scene, or object, describe it conversationally using multimodal vision.\n\n"
             "### TOOL EXECUTION & OUTCOME ACCURACY RULES:\n"
             "- HONEST OUTCOME REPORTING ONLY: You must NEVER claim an action was successful, never say 'Done!', 'I've updated that for you', or 'Success' unless the tool execution explicitly succeeded.\n"
@@ -442,7 +472,7 @@ class AgentService:
             "- When the user sends a greeting (e.g. 'Hi', 'Hey', 'Good morning'), reply ONLY with a warm, natural greeting. NEVER attach questions or follow-ups about earlier sales, expenses, reminders, or tasks.\n\n"
             "### AUTHORITATIVE TOOL CAPABILITIES:\n"
             "1. Reminders & Alarms: Schedule reminders with `create_reminder`. Use ONLY when the user provides an unambiguous, specific time. For vague phrases like 'later today' or 'soon', DO NOT call `create_reminder` — ask: 'What time works for you?'\n"
-            "2. Sales & Expenses: Stage sales and expenses in Naira using `record_transaction`.\n"
+            "2. Sales & Expenses: For single items, stage using `record_transaction`. For multiple items from a handwritten list, paper sheet, or receipt (up to 100 items), ALWAYS use `record_batch_transactions` so each item is stored distinctly.\n"
             "3. Instant PDF Receipts & Invoices: Generate official PDF receipts/invoices directly to WhatsApp using `generate_receipt`. When a user requests a receipt for a transaction (e.g. 'I need a receipt for 10 books at 3000 each'): stage the sale with `record_transaction` including customer_name if specified. If customer name was not specified, you may ask who to bill or bill to 'Walk-in Customer'. When a user provides business branding or profile details (e.g. 'my business name is...', 'set business name to...', 'set address to...', 'my shop address is...'), immediately save it with `set_receipt_template` or `update_receipt_template` so their official name, address, and contact details appear on all future receipts. Users can also send their store logo photo in chat with caption 'Set logo'.\n"
             "4. Debt Tracking: Track customer credit sales, list debtors with `list_outstanding_debts`, mark debts as paid with `mark_debt_paid`, and draft customer payment reminders for the owner with `draft_payment_reminder`.\n"
             "5. Low-Stock Alerts & Inventory: Track inventory quantities and set reorder threshold alerts using `set_reorder_threshold`. If the user specifies BOTH a threshold and their current stock level in the same message (e.g. 'Alert me when my rice stock reduces to 15 bags, I currently have 20 bags'), capture both in `set_reorder_threshold` (`threshold=15`, `current_quantity=20`). Correct or update actual physical counts directly without requiring unit cost using `correct_stock_level`.\n"
@@ -933,6 +963,7 @@ class AgentService:
                 is_credit = bool(tool_args.get("is_credit"))
                 customer_name = tool_args.get("customer_name")
                 due_date = tool_args.get("due_date")
+                occurred_at_date = tool_args.get("occurred_at_date")
 
                 if not amount_val or float(amount_val) <= 0:
                     return "Error: Missing valid amount. Ask the user for the amount in Naira.", False
@@ -953,6 +984,7 @@ class AgentService:
                     is_credit=is_credit,
                     customer_name=customer_name,
                     due_date=due_date,
+                    occurred_at_date=occurred_at_date,
                 )
 
                 extraction = await self.ledger.create_ai_extraction(
@@ -992,6 +1024,101 @@ class AgentService:
                 )
                 confirmation.confirmation_message_id = outbound.id
                 return f"Success: Transaction staged for confirmation with text '{conf_text}'. Interactive buttons delivered to user.", True
+
+            elif tool_name == "record_batch_transactions":
+                record_type = tool_args.get("record_type") or "sale"
+                raw_items = tool_args.get("items") or []
+                occurred_at_date = tool_args.get("occurred_at_date")
+                customer_name = tool_args.get("customer_name")
+
+                if not raw_items:
+                    return "Error: Missing items in batch. Please provide at least one item.", False
+
+                parsed_items: list[LineItemRecord] = []
+                total_amount = Decimal("0")
+
+                for it in raw_items:
+                    amt_val = it.get("amount")
+                    if amt_val is None:
+                        continue
+                    try:
+                        amt_dec = Decimal(str(amt_val))
+                    except Exception:
+                        continue
+                    if amt_dec <= 0:
+                        continue
+
+                    qty_val = it.get("quantity")
+                    qty_dec = Decimal(str(qty_val)) if qty_val is not None else None
+                    up_val = it.get("unit_price")
+                    up_dec = Decimal(str(up_val)) if up_val is not None else None
+
+                    parsed_items.append(
+                        LineItemRecord(
+                            item_name=it.get("item_name") or "Item",
+                            quantity=qty_dec,
+                            unit=it.get("unit"),
+                            unit_price=up_dec,
+                            amount=amt_dec,
+                            description=it.get("description"),
+                            is_credit=bool(it.get("is_credit")),
+                            customer_name=it.get("customer_name") or customer_name,
+                        )
+                    )
+                    total_amount += amt_dec
+
+                if not parsed_items:
+                    return "Error: No valid items with positive amounts were provided in the batch.", False
+
+                record = ExtractedRecord(
+                    record_type=record_type,
+                    amount=total_amount,
+                    item_name=f"{len(parsed_items)} items batch",
+                    items=parsed_items,
+                    occurred_at_date=occurred_at_date,
+                    currency="NGN",
+                    confidence=0.95,
+                    needs_clarification=False,
+                    customer_name=customer_name,
+                )
+
+                extraction = await self.ledger.create_ai_extraction(
+                    db,
+                    business.id,
+                    inbound_message_id or business.id,
+                    raw_user_text,
+                    record,
+                    status="succeeded",
+                    provider="local_heuristic",
+                    model="tool-calling-batch",
+                    input_tokens=0,
+                    output_tokens=0,
+                    estimated_cost_usd=Decimal("0.00"),
+                )
+
+                confirmation = await self.ledger.stage_record_for_confirmation(
+                    db,
+                    business.id,
+                    inbound_message_id or business.id,
+                    extraction,
+                    record,
+                    member_id=actor.member_id if actor else None,
+                    source_wamid=source_wamid,
+                )
+
+                conf_text = confirmation.confirmation_text or build_confirmation_text(record)
+                send_result = await self.whatsapp.send_confirmation(user.phone_number, conf_text)
+                outbound = await self.ledger.record_outbound_message(
+                    db,
+                    business.id,
+                    user.phone_number,
+                    conf_text,
+                    send_result,
+                    message_type="interactive",
+                    user_id=user.id,
+                )
+                confirmation.confirmation_message_id = outbound.id
+                return f"Success: Batch of {len(parsed_items)} items staged for confirmation with text '{conf_text}'. Interactive buttons delivered to user.", True
 
             elif tool_name == "set_item_cost":
                 item_name = tool_args.get("item_name")

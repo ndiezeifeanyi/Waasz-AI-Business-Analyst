@@ -34,6 +34,33 @@ def normalize_confirmation_reply(
 
 
 def build_confirmation_text(record: ExtractedRecord) -> str:
+    if record.items and len(record.items) > 1:
+        n_items = len(record.items)
+        plural_type = "sales" if record.record_type == "sale" else "expenses" if record.record_type == "expense" else "items"
+        lines = [f"Please confirm {n_items} item {plural_type}:"]
+        if record.occurred_at_date:
+            lines.append(f"📅 Date: {record.occurred_at_date}")
+        if record.customer_name:
+            lines.append(f"👤 Customer: {record.customer_name}")
+
+        display_limit = 15
+        for idx, it in enumerate(record.items[:display_limit], 1):
+            qty_str = f"{it.quantity:g} " if it.quantity is not None else ""
+            unit_str = f"{it.unit} " if it.unit else ""
+            amt_str = format_naira(it.amount)
+            prefix = f"{qty_str}{unit_str}".strip()
+            item_desc = f"{it.item_name} ({prefix})" if prefix else it.item_name
+            lines.append(f"{idx}. {item_desc} - {amt_str}")
+
+        if n_items > display_limit:
+            remaining = n_items - display_limit
+            lines.append(f"... and {remaining} more items")
+
+        total_amt = record.amount if record.amount is not None else sum(it.amount for it in record.items)
+        lines.append(f"💰 Grand Total: {format_naira(total_amt)}")
+        lines.append("Reply 1=Yes, 2=Edit, 3=Cancel.")
+        return "\n".join(lines)
+
     quantity = f"{record.quantity:g} " if record.quantity is not None else ""
     unit = f"{record.unit} " if record.unit else ""
     item = record.item_name or record.description or "this record"
@@ -118,69 +145,83 @@ class ConfirmationService:
         confirmation.confirmed_at = datetime.now(UTC)
 
         tx_result = await db.execute(
-            select(Transaction).where(Transaction.confirmation_id == confirmation.id).limit(1)
+            select(Transaction).where(
+                (Transaction.confirmation_id == confirmation.id)
+                | (
+                    (Transaction.ai_extraction_id == confirmation.ai_extraction_id)
+                    & (Transaction.status == "pending_confirmation")
+                )
+            ).order_by(Transaction.created_at.asc())
         )
-        transaction = tx_result.scalar_one_or_none()
-        if transaction:
-            transaction.status = "confirmed"
-            transaction.confirmed_at = confirmation.confirmed_at
-            if confirmation.member_id and not transaction.created_by_member_id:
-                transaction.created_by_member_id = confirmation.member_id
-            if transaction.is_credit and transaction.customer_id:
-                debt_res = await db.execute(
-                    select(Debt).where(Debt.transaction_id == transaction.id).limit(1)
-                )
-                if not debt_res.scalar_one_or_none():
-                    due_dt = None
-                    if confirmation.extracted_record and confirmation.extracted_record.get("due_date"):
-                        try:
-                            due_raw = str(confirmation.extracted_record["due_date"]).replace("Z", "+00:00")
-                            due_dt = datetime.fromisoformat(due_raw)
-                            if due_dt.tzinfo is None:
-                                due_dt = due_dt.replace(tzinfo=UTC)
-                        except Exception:
-                            pass
-                    debt = Debt(
-                        business_id=transaction.business_id,
-                        customer_id=transaction.customer_id,
-                        created_by_member_id=confirmation.member_id,
-                        transaction_id=transaction.id,
-                        amount=transaction.amount or Decimal("0"),
-                        currency=transaction.currency or "NGN",
-                        status="outstanding",
-                        due_date=due_dt,
-                        notes=f"Credit sale for {transaction.item_name or 'goods'}",
+        transactions = tx_result.scalars().all()
+        if transactions:
+            low_stock_alerts: list[str] = []
+            for transaction in transactions:
+                transaction.status = "confirmed"
+                transaction.confirmed_at = confirmation.confirmed_at
+                if confirmation.member_id and not transaction.created_by_member_id:
+                    transaction.created_by_member_id = confirmation.member_id
+                if transaction.is_credit and transaction.customer_id:
+                    debt_res = await db.execute(
+                        select(Debt).where(Debt.transaction_id == transaction.id).limit(1)
                     )
-                    db.add(debt)
-                    await db.flush()
-            low_stock_msg = None
-            if transaction.transaction_type == "sale" and transaction.item_name and transaction.quantity:
-                norm_item = transaction.item_name.strip().lower()
-                inv_res = await db.execute(
-                    select(InventoryItem)
-                    .where(
-                        InventoryItem.business_id == transaction.business_id,
-                        InventoryItem.normalized_item_name == norm_item,
-                    )
-                    .limit(1)
-                )
-                item = inv_res.scalar_one_or_none()
-                if item:
-                    item.quantity_on_hand -= transaction.quantity
-                    item.updated_at = datetime.now(UTC)
-                    item.last_updated_from_confirmation_id = confirmation.id
-                    threshold = item.low_stock_threshold
-                    if threshold is not None and item.quantity_on_hand <= threshold:
-                        unit_str = f" {item.unit}" if item.unit else ""
-                        low_stock_msg = (
-                            f"\n\n⚠️ Low Stock Alert: {item.item_name} is down to {item.quantity_on_hand:g}{unit_str} "
-                            f"(reorder threshold: {threshold:g}{unit_str})."
+                    if not debt_res.scalar_one_or_none():
+                        due_dt = None
+                        if confirmation.extracted_record and confirmation.extracted_record.get("due_date"):
+                            try:
+                                due_raw = str(confirmation.extracted_record["due_date"]).replace("Z", "+00:00")
+                                due_dt = datetime.fromisoformat(due_raw)
+                                if due_dt.tzinfo is None:
+                                    due_dt = due_dt.replace(tzinfo=UTC)
+                            except Exception:
+                                pass
+                        debt = Debt(
+                            business_id=transaction.business_id,
+                            customer_id=transaction.customer_id,
+                            created_by_member_id=confirmation.member_id,
+                            transaction_id=transaction.id,
+                            amount=transaction.amount or Decimal("0"),
+                            currency=transaction.currency or "NGN",
+                            status="outstanding",
+                            due_date=due_dt,
+                            notes=f"Credit sale for {transaction.item_name or 'goods'}",
                         )
-                    await db.flush()
+                        db.add(debt)
+                        await db.flush()
 
-            base_text = confirmation_success_text(transaction.transaction_type, is_credit=transaction.is_credit)
-            if low_stock_msg:
-                base_text += low_stock_msg
+                if transaction.transaction_type == "sale" and transaction.item_name and transaction.quantity:
+                    norm_item = transaction.item_name.strip().lower()
+                    inv_res = await db.execute(
+                        select(InventoryItem)
+                        .where(
+                            InventoryItem.business_id == transaction.business_id,
+                            InventoryItem.normalized_item_name == norm_item,
+                        )
+                        .limit(1)
+                    )
+                    item = inv_res.scalar_one_or_none()
+                    if item:
+                        item.quantity_on_hand -= transaction.quantity
+                        item.updated_at = datetime.now(UTC)
+                        item.last_updated_from_confirmation_id = confirmation.id
+                        threshold = item.low_stock_threshold
+                        if threshold is not None and item.quantity_on_hand <= threshold:
+                            unit_str = f" {item.unit}" if item.unit else ""
+                            low_stock_alerts.append(
+                                f"⚠️ Low Stock Alert: {item.item_name} is down to {item.quantity_on_hand:g}{unit_str} "
+                                f"(reorder threshold: {threshold:g}{unit_str})."
+                            )
+                        await db.flush()
+
+            if len(transactions) > 1:
+                total_sum = sum((t.amount or Decimal("0")) for t in transactions)
+                plural_type = "sales" if transactions[0].transaction_type == "sale" else "expenses"
+                base_text = f"Done! I have confirmed and recorded all {len(transactions)} {plural_type} (Total: {format_naira(total_sum)})."
+            else:
+                base_text = confirmation_success_text(transactions[0].transaction_type, is_credit=transactions[0].is_credit)
+
+            if low_stock_alerts:
+                base_text += "\n\n" + "\n".join(low_stock_alerts)
             return base_text
 
         move_result = await db.execute(
@@ -216,8 +257,19 @@ class ConfirmationService:
         )
 
     async def cancel(self, db: AsyncSession, confirmation: Confirmation) -> str:
-        confirmation.status = "cancelled"
+        confirmation.status = "rejected"
         confirmation.updated_at = datetime.now(UTC)
+        tx_result = await db.execute(
+            select(Transaction).where(
+                (Transaction.confirmation_id == confirmation.id)
+                | (
+                    (Transaction.ai_extraction_id == confirmation.ai_extraction_id)
+                    & (Transaction.status == "pending_confirmation")
+                )
+            )
+        )
+        for tx in tx_result.scalars().all():
+            tx.status = "rejected"
         return "Record discarded. What else can I help you with?"
 
     async def _apply_inventory_movement(
