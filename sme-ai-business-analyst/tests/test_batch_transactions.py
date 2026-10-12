@@ -8,10 +8,16 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 import pytest
+from sqlalchemy import select, delete
 from app.core.database import async_session_factory
 from app.models.business import Business
 from app.models.user import User
 from app.models.transaction import Transaction
+from app.models.confirmation import Confirmation
+from app.models.extraction import AiExtraction
+from app.models.message import WhatsAppMessage
+from app.models.customer import Customer
+from app.models.member import Member
 from app.schemas.extraction import ExtractedRecord, LineItemRecord
 from app.services.confirmation_service import build_confirmation_text, ConfirmationService
 from app.services.ledger_service import LedgerService, parse_occurred_at_date
@@ -78,150 +84,160 @@ async def test_end_to_end_batch_staging_and_confirmation():
         unique_suffix = uuid4().hex[:6]
         phone = f"+2348099{unique_suffix[:6]}"
         biz, user = await ledger.get_or_create_business_and_user(db, phone)
+        try:
+            # Build 18 batch items
+            items = [
+                LineItemRecord(
+                    item_name=f"Engine Oil Filter #{i}",
+                    quantity=Decimal("2"),
+                    unit="pcs",
+                    amount=Decimal(f"{i * 2500}"),
+                )
+                for i in range(1, 19)
+            ]
+            total_amount = sum(it.amount for it in items)
 
-        # Build 18 batch items
-        items = [
-            LineItemRecord(
-                item_name=f"Engine Oil Filter #{i}",
-                quantity=Decimal("2"),
-                unit="pcs",
-                amount=Decimal(f"{i * 2500}"),
+            record = ExtractedRecord(
+                record_type="sale",
+                amount=total_amount,
+                item_name="18 items batch",
+                items=items,
+                occurred_at_date="30/9/026",
+                customer_name="Chief Emeka",
             )
-            for i in range(1, 19)
-        ]
-        total_amount = sum(it.amount for it in items)
 
-        record = ExtractedRecord(
-            record_type="sale",
-            amount=total_amount,
-            item_name="18 items batch",
-            items=items,
-            occurred_at_date="30/9/026",
-            customer_name="Chief Emeka",
-        )
-
-        # Create real inbound WhatsAppMessage to satisfy foreign key
-        from app.schemas.whatsapp import ParsedWhatsAppMessage
-        parsed_inbound = ParsedWhatsAppMessage(
-            message_id=f"wamid.{uuid4().hex}",
-            from_phone=phone,
-            message_type="image",
-            body="Handwritten paper with 18 items",
-            timestamp=datetime.now(UTC),
-        )
-        inbound_msg = await ledger.record_inbound_message(db, parsed_inbound, biz, user)
-        await db.flush()
-
-        extraction = await ledger.create_ai_extraction(
-            db,
-            biz.id,
-            inbound_msg.id,
-            "Handwritten paper with 18 items",
-            record,
-            status="succeeded",
-            provider="local_heuristic",
-            model="test-batch",
-        )
-
-        # Stage record
-        confirmation = await ledger.stage_record_for_confirmation(
-            db,
-            biz.id,
-            inbound_msg.id,
-            extraction,
-            record,
-            source_wamid=parsed_inbound.message_id,
-        )
-        await db.commit()
-
-        assert confirmation.status == "pending"
-        assert "18. Engine Oil Filter #18" in confirmation.confirmation_text
-
-        # Verify staged transactions in database
-        from sqlalchemy import select
-        tx_res = await db.execute(
-            select(Transaction).where(
-                (Transaction.confirmation_id == confirmation.id)
-                | (Transaction.ai_extraction_id == confirmation.ai_extraction_id)
-            ).order_by(Transaction.created_at.asc())
-        )
-        txs = tx_res.scalars().all()
-        assert len(txs) == 18
-
-        # First transaction links confirmation_id and source_wamid, rest do not violate unique constraint
-        assert txs[0].confirmation_id == confirmation.id
-        assert txs[0].source_wamid == parsed_inbound.message_id
-        for i in range(1, 18):
-            assert txs[i].confirmation_id is None
-            assert txs[i].source_wamid is None
-            assert txs[i].ai_extraction_id == confirmation.ai_extraction_id
-
-        # Check date parsed correctly
-        for tx in txs:
-            assert tx.occurred_at.year == 2026
-            assert tx.occurred_at.month == 9
-            assert tx.occurred_at.day == 30
-            assert tx.status == "pending_confirmation"
-
-        print(f"Staged {len(txs)} transactions successfully with occurred_at {txs[0].occurred_at}!")
-
-        # Confirm the batch
-        confirm_reply = await confirmations.confirm(db, confirmation)
-        await db.commit()
-
-        print(f"Confirmation reply: {confirm_reply}")
-        assert "Done! I have confirmed and recorded all 18 sales" in confirm_reply
-
-        # Check that all 18 transactions are now confirmed
-        tx_res2 = await db.execute(
-            select(Transaction).where(
-                (Transaction.confirmation_id == confirmation.id)
-                | (Transaction.ai_extraction_id == confirmation.ai_extraction_id)
+            # Create real inbound WhatsAppMessage to satisfy foreign key
+            from app.schemas.whatsapp import ParsedWhatsAppMessage
+            parsed_inbound = ParsedWhatsAppMessage(
+                message_id=f"wamid.{uuid4().hex}",
+                from_phone=phone,
+                message_type="image",
+                body="Handwritten paper with 18 items",
+                timestamp=datetime.now(UTC),
             )
-        )
-        txs2 = tx_res2.scalars().all()
-        assert len(txs2) == 18
-        for tx in txs2:
-            assert tx.status == "confirmed"
-            assert tx.confirmed_at is not None
+            inbound_msg = await ledger.record_inbound_message(db, parsed_inbound, biz, user)
+            await db.flush()
 
-        print("All 18 transactions verified confirmed in DB!")
-
-        # Now test cancellation with another batch
-        items_cancel = [
-            LineItemRecord(item_name="Brake Pad", amount=Decimal("15000")),
-            LineItemRecord(item_name="Brake Fluid", amount=Decimal("5000")),
-        ]
-        cancel_record = ExtractedRecord(
-            record_type="expense",
-            amount=Decimal("20000"),
-            items=items_cancel,
-        )
-        ext2 = await ledger.create_ai_extraction(
-            db, biz.id, inbound_msg.id, "Expense note", cancel_record
-        )
-        conf2 = await ledger.stage_record_for_confirmation(
-            db, biz.id, inbound_msg.id, ext2, cancel_record
-        )
-        await db.commit()
-
-        cancel_reply = await confirmations.cancel(db, conf2)
-        await db.commit()
-
-        assert "Record discarded" in cancel_reply
-
-        tx_res3 = await db.execute(
-            select(Transaction).where(
-                (Transaction.confirmation_id == conf2.id)
-                | (Transaction.ai_extraction_id == conf2.ai_extraction_id)
+            extraction = await ledger.create_ai_extraction(
+                db,
+                biz.id,
+                inbound_msg.id,
+                "Handwritten paper with 18 items",
+                record,
+                status="succeeded",
+                provider="local_heuristic",
+                model="test-batch",
             )
-        )
-        txs3 = tx_res3.scalars().all()
-        assert len(txs3) == 2
-        for tx in txs3:
-            assert tx.status == "rejected"
 
-        print("Batch cancellation verified in DB!")
+            # Stage record
+            confirmation = await ledger.stage_record_for_confirmation(
+                db,
+                biz.id,
+                inbound_msg.id,
+                extraction,
+                record,
+                source_wamid=parsed_inbound.message_id,
+            )
+            await db.commit()
+
+            assert confirmation.status == "pending"
+            assert "18. Engine Oil Filter #18" in confirmation.confirmation_text
+
+            # Verify staged transactions in database
+            tx_res = await db.execute(
+                select(Transaction).where(
+                    (Transaction.confirmation_id == confirmation.id)
+                    | (Transaction.ai_extraction_id == confirmation.ai_extraction_id)
+                ).order_by(Transaction.created_at.asc())
+            )
+            txs = tx_res.scalars().all()
+            assert len(txs) == 18
+
+            # First transaction links confirmation_id and source_wamid, rest do not violate unique constraint
+            assert txs[0].confirmation_id == confirmation.id
+            assert txs[0].source_wamid == parsed_inbound.message_id
+            for i in range(1, 18):
+                assert txs[i].confirmation_id is None
+                assert txs[i].source_wamid is None
+                assert txs[i].ai_extraction_id == confirmation.ai_extraction_id
+
+            # Check date parsed correctly
+            for tx in txs:
+                assert tx.occurred_at.year == 2026
+                assert tx.occurred_at.month == 9
+                assert tx.occurred_at.day == 30
+                assert tx.status == "pending_confirmation"
+
+            print(f"Staged {len(txs)} transactions successfully with occurred_at {txs[0].occurred_at}!")
+
+            # Confirm the batch
+            confirm_reply = await confirmations.confirm(db, confirmation)
+            await db.commit()
+
+            print(f"Confirmation reply: {confirm_reply}")
+            assert "Done! I have confirmed and recorded all 18 sales" in confirm_reply
+
+            # Check that all 18 transactions are now confirmed
+            tx_res2 = await db.execute(
+                select(Transaction).where(
+                    (Transaction.confirmation_id == confirmation.id)
+                    | (Transaction.ai_extraction_id == confirmation.ai_extraction_id)
+                )
+            )
+            txs2 = tx_res2.scalars().all()
+            assert len(txs2) == 18
+            for tx in txs2:
+                assert tx.status == "confirmed"
+                assert tx.confirmed_at is not None
+
+            print("All 18 transactions verified confirmed in DB!")
+
+            # Now test cancellation with another batch
+            items_cancel = [
+                LineItemRecord(item_name="Brake Pad", amount=Decimal("15000")),
+                LineItemRecord(item_name="Brake Fluid", amount=Decimal("5000")),
+            ]
+            cancel_record = ExtractedRecord(
+                record_type="expense",
+                amount=Decimal("20000"),
+                items=items_cancel,
+            )
+            ext2 = await ledger.create_ai_extraction(
+                db, biz.id, inbound_msg.id, "Expense note", cancel_record
+            )
+            conf2 = await ledger.stage_record_for_confirmation(
+                db, biz.id, inbound_msg.id, ext2, cancel_record
+            )
+            await db.commit()
+
+            cancel_reply = await confirmations.cancel(db, conf2)
+            await db.commit()
+
+            assert "Record discarded" in cancel_reply
+
+            tx_res3 = await db.execute(
+                select(Transaction).where(
+                    (Transaction.confirmation_id == conf2.id)
+                    | (Transaction.ai_extraction_id == conf2.ai_extraction_id)
+                )
+            )
+            txs3 = tx_res3.scalars().all()
+            assert len(txs3) == 2
+            for tx in txs3:
+                assert tx.status == "rejected"
+
+            print("Batch cancellation verified in DB!")
+        finally:
+            # Clean up test business and all associated mock records so test never pollutes production DB
+            await db.execute(delete(Transaction).where(Transaction.business_id == biz.id))
+            await db.execute(delete(Confirmation).where(Confirmation.business_id == biz.id))
+            await db.execute(delete(AiExtraction).where(AiExtraction.business_id == biz.id))
+            await db.execute(delete(WhatsAppMessage).where(WhatsAppMessage.business_id == biz.id))
+            await db.execute(delete(Customer).where(Customer.business_id == biz.id))
+            await db.execute(delete(Member).where(Member.business_id == biz.id))
+            await db.execute(delete(User).where(User.business_id == biz.id))
+            await db.execute(delete(Business).where(Business.id == biz.id))
+            await db.commit()
 
 
 if __name__ == "__main__":

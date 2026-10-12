@@ -1504,7 +1504,7 @@ class WhatsAppWebhookProcessor:
 
         # 2. Stage: Awaiting Business Name
         if stage == "awaiting_business_name" or (business.is_provisional and business.name.startswith("WhatsApp Business ")):
-            # Guard against capturing user greetings, questions, or acknowledgements as their business name
+            # Guard against capturing user greetings as their business name
             common_greetings = {
                 "hafa", "howfar", "how far", "how fa", "how body", "how na", "wetin", "wetin dey", "wetin sup",
                 "hi", "hello", "hey", "heyy", "heya", "holla", "yo", "yoo", "sup", "wassup", "what's up", "whats up",
@@ -1525,33 +1525,55 @@ class WhatsAppWebhookProcessor:
                     "What is the official name of your shop or business? (e.g. *'Emeka Provisions'* or *'Mama Joy Kitchen'*)"
                 )
 
-            # Guard against capturing user queries, questions, or conversational requests as their business name
-            is_query = (
-                "?" in raw_text
-                or any(re.search(p, lower_text) for p in (
-                    r"\b(pls|please)\b",
-                    r"\b(can|could|would|will)\s+(you|u)\b",
-                    r"\b(how|what|why|who|when|where|which)\b",
-                    r"\b(tell|give|show|recommend|suggest|explain|list|help)\s+(me|us|u)?\b",
-                    r"\b(i\s+want|i\s+need|i\s+am|i'm|im)\b",
-                    r"\b(do\s+you|are\s+you)\b",
-                    r"\b(novel|book|movie|song|music|news|weather|joke)\b",
-                ))
-                or len(raw_text.split()) > 5
-                or len(raw_text) > 40
-            )
-            if is_query:
-                # Do NOT treat this as a shop name! Return None so the agent/QA answers their question!
-                return None
-
-            shop_name = re.sub(
-                r"^(my\s+(shop|business|store|company)\s+(name\s+)?(is|:)?|it\s+is\s+|name\s*:\s*)",
-                "",
+            # Check if this is an explicit business name declaration
+            explicit_match = re.match(
+                r"^(?:my\s+)?(?:shop|store|business|company|brand)\s*(?:name)?\s*(?:is|:)\s*(.+)$",
                 raw_text,
-                flags=re.IGNORECASE,
-            ).strip().strip("\"'").strip()
+                re.IGNORECASE,
+            )
+            if not explicit_match:
+                explicit_match = re.match(
+                    r"^(?:set|change)\s+(?:shop|store|business)\s+name(?:\s+to|:)\s*(.+)$",
+                    raw_text,
+                    re.IGNORECASE,
+                )
+            if not explicit_match:
+                explicit_match = re.match(
+                    r"^(?:name\s*:)\s*(.+)$",
+                    raw_text,
+                    re.IGNORECASE,
+                )
 
-            if not shop_name or len(shop_name) < 2 or len(shop_name.split()) > 5 or len(shop_name) > 40:
+            shop_name = None
+            if explicit_match:
+                candidate = explicit_match.group(1).strip().strip("\"'")
+                if 2 <= len(candidate) <= 50:
+                    shop_name = candidate
+            else:
+                # If not explicitly declared, only accept if it genuinely looks like a business name
+                # and NOT a question, greeting, conversational remark, sentence, or command.
+                disqualifying_patterns = [
+                    r"\?",  # Any question mark
+                    r"\b(?:i|me|my|mine|myself|you|your|yours|yourself|u|ur|we|us|our|ours|he|she|him|her|they|them|their|it|its)\b",  # Pronouns
+                    r"\b(?:is|are|am|was|were|be|been|being|have|has|had|do|does|did|will|would|can|could|should|shall|may|might|must)\b", # Auxiliary verbs
+                    r"\b(?:meant|mean|think|thought|want|need|wish|hope|ask|asking|tell|give|show|help|find|look|see|know|said|say|saying|trying|check|checking|feel|hear|believe|call|calling)\b", # Conversational verbs
+                    r"\b(?:just|actually|really|only|maybe|like|so|because|if|when|then|why|how|what|where|who|which|whose|whom|not|no|neither|nor|or|but|also|anyway|well|pls|please|thanks|thank)\b", # Fillers/connectors
+                    r"\b(?:hi|hello|hey|heyy|hafa|howfar|kedu|bawo|sannu|gm|ga|ge|sup|wassup|ok|okay|alright|yes|yeah|nope)\b", # Greetings/acknowledgements
+                ]
+                
+                is_disqualified = any(re.search(pat, lower_text) for pat in disqualifying_patterns)
+                
+                business_suffix_pattern = r"\b(?:store|stores|shop|shops|enterprise|enterprises|venture|ventures|plaza|hub|salon|pharmacy|chemist|chemists|supermarket|boutique|kitchen|bakery|bakes|farms|farm|motors|auto|electronics|fashion|wears|mart|concepts|concept|provisions|drinks|logistics|spa|beauty|hair|corner|collection|collections|cafe|restaurant|ltd|limited|services|agency|hardware|outfit|outfits|cosmetics)\b"
+                has_biz_suffix = bool(re.search(business_suffix_pattern, lower_text))
+                
+                words = raw_text.split()
+                is_proper_cased = all(w[0].isupper() for w in words if w[0].isalpha()) if words else False
+
+                if not is_disqualified and 1 <= len(words) <= 4 and len(raw_text) <= 35 and (has_biz_suffix or is_proper_cased):
+                    shop_name = raw_text.strip().strip("\"'")
+
+            if not shop_name:
+                # Do NOT treat this as a shop name! Return None so the agent/QA answers their question or handles their chat!
                 return None
 
             business.name = shop_name
