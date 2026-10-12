@@ -197,6 +197,23 @@ class UnifiedReportService:
         )
         prior_acts = (await db.execute(stmt_prior)).scalars().all()
 
+        # Suppression check for inactive testers:
+        # If user has zero activities in current period AND zero lifetime transactions,
+        # suppress sending an empty report to avoid spamming an unengaged merchant.
+        if len(curr_acts) == 0 and user.business_id:
+            from app.models.transaction import Transaction
+            from sqlalchemy import func
+            tx_count = await db.scalar(
+                select(func.count(Transaction.id)).where(Transaction.business_id == user.business_id)
+            )
+            if not tx_count or tx_count == 0:
+                logger.info(
+                    "User %s has zero lifetime transactions and 0 current activities; skipping empty %s report",
+                    user_id,
+                    cadence,
+                )
+                return {"status": "skipped", "reason": "no_lifetime_activity"}
+
         # 3. Fetch active user goals
         stmt_goals = (
             select(UserGoal)

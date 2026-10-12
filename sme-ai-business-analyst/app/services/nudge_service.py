@@ -112,6 +112,20 @@ class InactivityNudgeService:
                     logger.info("User %s has never messaged and account is %d days old; skipping nudge", user.id, created_days)
                     return False
 
+        # Suppress repeated nudges if user has 0 lifetime transactions and account is >= 2 days old
+        if user.business_id:
+            from app.models.transaction import Transaction
+            from sqlalchemy import func
+            tx_count = await db.scalar(
+                select(func.count(Transaction.id)).where(Transaction.business_id == user.business_id)
+            )
+            if (not tx_count or tx_count == 0) and user.created_at:
+                created_dt = user.created_at if user.created_at.tzinfo else user.created_at.replace(tzinfo=UTC)
+                created_days = (now_utc - created_dt).days
+                if created_days >= 2:
+                    logger.info("User %s has 0 lifetime transactions and account is %d days old; skipping repeated nudge spam", user.id, created_days)
+                    return False
+
         # 3. Check idempotency: ensure we haven't already nudged user today
         recent_msg_stmt = (
             select(WhatsAppMessage)

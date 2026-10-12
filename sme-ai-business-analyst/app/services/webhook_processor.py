@@ -397,6 +397,13 @@ class WhatsAppWebhookProcessor:
             logger.info("Idempotency: message %s already processed. Silently skipping duplicate delivery.", parsed.message_id)
             return
 
+        # Real-time founder alert for external testers
+        try:
+            import asyncio
+            asyncio.create_task(self._notify_founder_of_inbound(parsed, business, user))
+        except Exception:
+            pass
+
         # Deterministic Alarm Button / Reply handling (NOT routed through LLM agent)
         alarm_reply = await self._try_handle_alarm_button(db, parsed, business, user)
         if alarm_reply:
@@ -1411,6 +1418,41 @@ class WhatsAppWebhookProcessor:
             return res
         return None
 
+    async def _notify_founder_of_inbound(
+        self,
+        parsed: ParsedWhatsAppMessage,
+        business: Business | None,
+        user: User | None,
+        founder_phone: str = "2347065015924",
+    ) -> None:
+        """
+        Real-time telemetry alert sent to the founder's WhatsApp whenever an external tester messages Waasz.
+        Helps the founder monitor what is happening live and unblock users immediately.
+        """
+        try:
+            norm_from = normalize_phone(parsed.from_phone)
+            norm_founder = normalize_phone(founder_phone)
+            # Never alert the founder about their own testing messages
+            if norm_from == norm_founder:
+                return
+
+            biz_name = getattr(business, "name", None) or "New User"
+            raw_body = (parsed.body or "").strip()
+            if not raw_body and parsed.message_type:
+                raw_body = f"[{parsed.message_type.upper()}]"
+            preview = raw_body[:100]
+
+            alert_text = (
+                f"🔔 *Waasz Pilot Alert*\n"
+                f"📱 From: +{norm_from}\n"
+                f"🏪 Shop: {biz_name}\n"
+                f"💬 Message: \"{preview}\""
+            )
+            await self.whatsapp.send_text(norm_founder, alert_text)
+            logger.info("Dispatched live founder alert to %s for inbound from %s", norm_founder, norm_from)
+        except Exception as exc:
+            logger.debug("Non-fatal: could not dispatch founder alert: %s", exc)
+
     def _build_onboarding_intro_message(self, invite_verified: bool = False, referral_msg: str = "") -> str:
         header = "🎉 Welcome to Waasz! Your invite code has been verified and your account is ready.\n\n" if invite_verified else "👋 Welcome to Waasz!\n\n"
         drive_suggestion = ""
@@ -1433,7 +1475,7 @@ class WhatsAppWebhookProcessor:
             "🏪 *First Step — Set up your Shop:*\n"
             "*What is the name of your shop or business?*\n"
             "(e.g. reply: *\"Emeka Stores\"* or *\"Blessing Boutique\"*)\n\n"
-            "🧾 *Receipts & Invoices Personalization:*\n"
+            "🧾 *One-Time Setup for Receipts & Invoices:*\n"
             "To personalize your PDF receipts and invoices with your real store details, you can reply anytime:\n"
             "• *Set business name: [Your Store Name]* (e.g. _Set business name: Ify Bookshop_)\n"
             "• *Set address: [Your Store Address]* (e.g. _Set address: 12 Marina, Lagos_)\n"
@@ -1502,6 +1544,10 @@ class WhatsAppWebhookProcessor:
                 await db.flush()
             return None
 
+        # If this message is a structured store setup command, skip onboarding handler so dedicated store details logic handles it
+        if self._extract_store_setup_details(raw_text):
+            return None
+
         # 2. Stage: Awaiting Business Name
         if stage == "awaiting_business_name" or (business.is_provisional and business.name.startswith("WhatsApp Business ")):
             # Guard against capturing user greetings as their business name
@@ -1521,8 +1567,13 @@ class WhatsAppWebhookProcessor:
             if is_greeting:
                 greeting_reply = "Hafa! 👋" if any(g in clean_word for g in ("hafa", "how far", "howfar", "wetin")) else "Hello! 👋"
                 return (
-                    f"{greeting_reply} Welcome to Waasz.\n\n"
-                    "What is the official name of your shop or business? (e.g. *'Emeka Provisions'* or *'Mama Joy Kitchen'*)"
+                    f"{greeting_reply} Welcome to Waasz — your smart business manager on WhatsApp.\n\n"
+                    "You can start immediately without installing any app:\n\n"
+                    "🎙️ *Send a voice note of a sale* (e.g. _'Sold 2 bags of rice ₦90,000 to Emeka'_)\n"
+                    "📸 *Snap a photo of your paper sales book or receipt*\n"
+                    "✍️ *Or type a sale directly* (e.g. _'Sold 3 shoes ₦35,000'_)\n\n"
+                    "👉 *Try it right now!* Send a voice note, snap a receipt, or type a sale to see your instant receipt.\n\n"
+                    "_(Whenever you want to brand receipts with your shop name, simply reply: *My shop name is [Your Store Name]* )_"
                 )
 
             # Check if this is an explicit business name declaration
