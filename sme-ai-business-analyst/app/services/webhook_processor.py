@@ -311,6 +311,12 @@ class WhatsAppWebhookProcessor:
             inbound = await self.ledger.record_inbound_message(db, parsed, business, user, event)
             inbound.status = "processed"
 
+            # One-time notification to founder when a brand-new number connects (no message body)
+            try:
+                await self._notify_founder_of_new_user(norm_phone, business)
+            except Exception:
+                pass
+
             ref_msg = ""
             if getattr(settings, "enable_user_referrals", False):
                 ref = await self.invites.generate_user_referral_code(db, user.id, max_uses=5)
@@ -396,13 +402,6 @@ class WhatsAppWebhookProcessor:
         if is_duplicate_message(inbound):
             logger.info("Idempotency: message %s already processed. Silently skipping duplicate delivery.", parsed.message_id)
             return
-
-        # Real-time founder alert for external testers
-        try:
-            import asyncio
-            asyncio.create_task(self._notify_founder_of_inbound(parsed, business, user))
-        except Exception:
-            pass
 
         # Deterministic Alarm Button / Reply handling (NOT routed through LLM agent)
         alarm_reply = await self._try_handle_alarm_button(db, parsed, business, user)
@@ -1418,40 +1417,36 @@ class WhatsAppWebhookProcessor:
             return res
         return None
 
-    async def _notify_founder_of_inbound(
+    async def _notify_founder_of_new_user(
         self,
-        parsed: ParsedWhatsAppMessage,
-        business: Business | None,
-        user: User | None,
+        norm_phone: str,
+        business: Business | None = None,
         founder_phone: str = "2347065015924",
     ) -> None:
         """
-        Real-time telemetry alert sent to the founder's WhatsApp whenever an external tester messages Waasz.
-        Helps the founder monitor what is happening live and unblock users immediately.
+        One-time notification sent to founder when a brand-new user connects to Waasz.
+        Strictly zero message body / preview to respect user privacy.
         """
         try:
-            norm_from = normalize_phone(parsed.from_phone)
             norm_founder = normalize_phone(founder_phone)
-            # Never alert the founder about their own testing messages
-            if norm_from == norm_founder:
+            if norm_phone == norm_founder:
                 return
 
-            biz_name = getattr(business, "name", None) or "New User"
-            raw_body = (parsed.body or "").strip()
-            if not raw_body and parsed.message_type:
-                raw_body = f"[{parsed.message_type.upper()}]"
-            preview = raw_body[:100]
+            if business:
+                settings_dict = dict(business.settings or {})
+                if settings_dict.get("founder_notified_new_user"):
+                    return  # Strictly one-time per user
+                settings_dict["founder_notified_new_user"] = True
+                business.settings = settings_dict
 
             alert_text = (
-                f"🔔 *Waasz Pilot Alert*\n"
-                f"📱 From: +{norm_from}\n"
-                f"🏪 Shop: {biz_name}\n"
-                f"💬 Message: \"{preview}\""
+                f"🎉 *New Waasz Tester Connected*\n"
+                f"📱 Phone: +{norm_phone}"
             )
             await self.whatsapp.send_text(norm_founder, alert_text)
-            logger.info("Dispatched live founder alert to %s for inbound from %s", norm_founder, norm_from)
+            logger.info("Dispatched one-time new user alert to founder for +%s", norm_phone)
         except Exception as exc:
-            logger.debug("Non-fatal: could not dispatch founder alert: %s", exc)
+            logger.debug("Non-fatal: could not dispatch new user founder alert: %s", exc)
 
     def _build_onboarding_intro_message(self, invite_verified: bool = False, referral_msg: str = "") -> str:
         header = "🎉 Welcome to Waasz! Your invite code has been verified and your account is ready.\n\n" if invite_verified else "👋 Welcome to Waasz!\n\n"
@@ -1598,11 +1593,13 @@ class WhatsAppWebhookProcessor:
             shop_name = None
             if explicit_match:
                 candidate = explicit_match.group(1).strip().strip("\"'")
-                if 2 <= len(candidate) <= 50:
+                alpha_count = sum(1 for c in candidate if c.isalpha())
+                has_math = any(c in "*+=/^%" for c in candidate) or bool(re.search(r"\d+\s*[*xX/+-]\s*\d+", candidate))
+                if 2 <= len(candidate) <= 50 and alpha_count >= 2 and not has_math:
                     shop_name = candidate
             else:
                 # If not explicitly declared, only accept if it genuinely looks like a business name
-                # and NOT a question, greeting, conversational remark, sentence, or command.
+                # and NOT a question, greeting, conversational remark, sentence, calculation, price, or command.
                 disqualifying_patterns = [
                     r"\?",  # Any question mark
                     r"\b(?:i|me|my|mine|myself|you|your|yours|yourself|u|ur|we|us|our|ours|he|she|him|her|they|them|their|it|its)\b",  # Pronouns
@@ -1610,17 +1607,38 @@ class WhatsAppWebhookProcessor:
                     r"\b(?:meant|mean|think|thought|want|need|wish|hope|ask|asking|tell|give|show|help|find|look|see|know|said|say|saying|trying|check|checking|feel|hear|believe|call|calling)\b", # Conversational verbs
                     r"\b(?:just|actually|really|only|maybe|like|so|because|if|when|then|why|how|what|where|who|which|whose|whom|not|no|neither|nor|or|but|also|anyway|well|pls|please|thanks|thank)\b", # Fillers/connectors
                     r"\b(?:hi|hello|hey|heyy|hafa|howfar|kedu|bawo|sannu|gm|ga|ge|sup|wassup|ok|okay|alright|yes|yeah|nope)\b", # Greetings/acknowledgements
+                    r"\b(?:flyer|design|logo|poster|picture|photo|video|ad|advert|image|camera|snap|baker|bake|front|top|bottom)\b", # Media/flyer requests
                 ]
                 
                 is_disqualified = any(re.search(pat, lower_text) for pat in disqualifying_patterns)
                 
-                business_suffix_pattern = r"\b(?:store|stores|shop|shops|enterprise|enterprises|venture|ventures|plaza|hub|salon|pharmacy|chemist|chemists|supermarket|boutique|kitchen|bakery|bakes|farms|farm|motors|auto|electronics|fashion|wears|mart|concepts|concept|provisions|drinks|logistics|spa|beauty|hair|corner|collection|collections|cafe|restaurant|ltd|limited|services|agency|hardware|outfit|outfits|cosmetics)\b"
+                # Check for math calculations, arithmetic, or prices (e.g. 150*20000, 10+5, 50k, ₦20,000)
+                has_math = any(c in "*+=/^%" for c in raw_text) or bool(re.search(r"\d+\s*[*xX/+-]\s*\d+", raw_text))
+                has_currency_or_qty = bool(re.search(r"(\b\d+\s*(?:k|naira|ngn|carton|cartons|bag|bags|pcs|pieces|loaf|loaves)\b)|[₦$£€]", lower_text))
+                alpha_count = sum(1 for c in raw_text if c.isalpha())
+
+                business_suffix_pattern = r"\b(?:store|stores|shop|shops|enterprise|enterprises|venture|ventures|plaza|hub|salon|pharmacy|chemist|chemists|supermarket|boutique|kitchen|bakery|bakes|farms|farm|motors|auto|electronics|fashion|wears|mart|concepts|concept|provisions|drinks|logistics|spa|beauty|hair|corner|collection|collections|cafe|restaurant|ltd|limited|services|agency|hardware|outfit|outfits|cosmetics|catering)\b"
                 has_biz_suffix = bool(re.search(business_suffix_pattern, lower_text))
                 
-                words = raw_text.split()
-                is_proper_cased = all(w[0].isupper() for w in words if w[0].isalpha()) if words else False
+                words = [w.strip() for w in raw_text.split() if w.strip()]
+                alpha_words = [w for w in words if any(c.isalpha() for c in w)]
 
-                if not is_disqualified and 1 <= len(words) <= 4 and len(raw_text) <= 35 and (has_biz_suffix or is_proper_cased):
+                # For a name without an explicit suffix, it MUST be at least 2 words, all starting with uppercase letters, and have NO digits at all
+                is_proper_cased = (
+                    len(alpha_words) >= 2
+                    and all(w[0].isalpha() and w[0].isupper() for w in alpha_words)
+                    and not any(c.isdigit() for c in raw_text)
+                )
+
+                if (
+                    not is_disqualified
+                    and not has_math
+                    and not has_currency_or_qty
+                    and alpha_count >= 3
+                    and 1 <= len(words) <= 4
+                    and len(raw_text) <= 35
+                    and (has_biz_suffix or is_proper_cased)
+                ):
                     shop_name = raw_text.strip().strip("\"'")
 
             if not shop_name:
