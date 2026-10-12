@@ -42,6 +42,16 @@ async def inspect_and_void():
             t.status = "void"
             print(f"Voided expense: {t.id} - {t.item_name} (₦{t.amount})")
 
+        # Cancel any stale pending or needs_edit confirmations from testing
+        p_res = await db.execute(
+            select(Confirmation).where(Confirmation.status.in_(["pending", "needs_edit"]))
+        )
+        stale_confs = p_res.scalars().all()
+        for c in stale_confs:
+            c.status = "rejected"
+            print(f"Cancelled stale pending confirmation: {c.id}")
+            await db.execute(update(Transaction).where(Transaction.confirmation_id == c.id).values(status="rejected"))
+
         await db.commit()
         print("Database commit completed.")
         break
