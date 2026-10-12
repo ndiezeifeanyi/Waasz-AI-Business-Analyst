@@ -204,6 +204,12 @@ class AiExtractionService:
         self.last_estimated_cost_usd = 0
 
         record_type = old_dict.get("record_type") or "sale"
+        flip_to_sale = bool(re.search(r"\b(?:sale|sales)\b.*?\b(?:not|no be)\s*(?:expense|expenses)\b", correction_text, re.I)) or bool(re.search(r"\b(?:change|switch|make)\b.*?\b(?:to|as)?\s*(?:sale|sales)\b", correction_text, re.I))
+        flip_to_expense = bool(re.search(r"\b(?:expense|expenses)\b.*?\b(?:not|no be)\s*(?:sale|sales)\b", correction_text, re.I)) or bool(re.search(r"\b(?:change|switch|make)\b.*?\b(?:to|as)?\s*(?:expense|expenses)\b", correction_text, re.I))
+        if flip_to_sale:
+            record_type = "sale"
+        elif flip_to_expense:
+            record_type = "expense"
         occurred_at_date = old_dict.get("occurred_at_date")
         items_raw = old_dict.get("items") or []
 

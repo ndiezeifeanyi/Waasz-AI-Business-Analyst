@@ -75,11 +75,11 @@ class RecordTransactionInput(BaseModel):
 
 
 class BatchLineItemInput(BaseModel):
-    item_name: str = Field(description="Exact name of the item, good, or service (e.g. 'Toyota Oil Filter', 'Spark plugs', 'Motor oil')")
+    item_name: str = Field(description="Exact name of the item, product, good, or service (e.g. 'Rice 50kg', 'Cooking Oil', 'Cement', 'Bread', 'Dress', 'Product Name')")
     quantity: float | None = Field(default=1.0, description="Numerical quantity sold or purchased")
-    unit: str | None = Field(default="item", description="Unit of measurement, e.g. 'pcs', 'litres', 'bags', 'cartons', 'units'")
+    unit: str | None = Field(default="item", description="Unit of measurement, e.g. 'pcs', 'litres', 'bags', 'cartons', 'sets', 'units'")
     unit_price: float | None = Field(default=None, description="Price per unit in Naira if indicated on paper/receipt")
-    amount: float = Field(description="Total monetary amount for this individual line item in Naira (NGN), e.g. 7000 for ₦7,000")
+    amount: float = Field(description="Total monetary amount for this individual line item in Naira (NGN). For paper documents and ledgers, extract the exact written line price. NEVER multiply this figure by quantity or code numbers.")
     description: str | None = Field(default=None, description="Optional extra details for this item")
     is_credit: bool = Field(default=False, description="Set to True if this line item was on credit")
     customer_name: str | None = Field(default=None, description="Customer name if sold on credit")
@@ -452,14 +452,18 @@ class AgentService:
             "### IMAGE, PAPER RECEIPT & MULTI-ITEM DOCUMENT UNDERSTANDING:\n"
             "- MULTI-ITEM LISTS / HANDWRITTEN PAPER / INVOICES (CRITICAL REQUIREMENT):\n"
             "  When the user sends a photo of a handwritten paper record, ledger page, receipt, invoice, or types a list containing multiple goods or services (from 2 up to 100 items):\n"
-            "  * NEVER lump or collapse multiple distinct goods into a single generic transaction (e.g. NEVER record 'Automotive parts for ₦411,000' or 'Goods for ₦100,000'). Traders and business owners must see their individual goods, quantities, and individual prices in their ledger and stock records.\n"
+            "  * NEVER lump or collapse multiple distinct goods into a single generic transaction (e.g. NEVER record 'Goods for ₦411,000'). Traders and business owners must see each individual product, quantity, and individual price in their ledger and stock records.\n"
             "  * Extract EVERY single line item individually with its exact item_name, quantity, unit, and individual line amount.\n"
-            "  * MATHEMATICAL RECONCILIATION WITH HANDWRITTEN TOTAL: Check if there is a written grand total or sum at the bottom of the ledger sheet or document (e.g. '411,000' at the bottom of the page). Sum up your extracted line items! If your line item sum differs from the handwritten total on the page, RECONCILE THEM: re-examine ambiguous handwritten digits (e.g., distinguishing 30,000 vs 43,000, 13,000 vs 26,000), check for scratched-out or corrected lines (use the final corrected figure, not the crossed-out one), and ensure each line's price is paired with the exact item on the same horizontal row. The sum of your items SHOULD reconcile with the merchant's written total.\n"
-            "  * UNDERSTAND MERCHANT LEDGER LAYOUT & NOTATIONS:\n"
-            "    - Far Left Column: Quantity and unit of goods bought/sold (e.g., '1 set', '1 pc', '2 pcs', '1'). 'set' represents 1 complete set/kit. Keep quantity as written (e.g., quantity: 1, unit: 'set').\n"
-            "    - Middle Column: Item/part name and specifications (e.g. 'up & down clutch', 'Oil filter hvc', 'Top gasket & oil filter', 'Ends & socket & seal', 'STD con' [standard connecting rod bearings], 'Shock pad', 'Tie rod ends', 'Ball joint', 'Back brake pad', 'Linkage', 'Pot', 'Steering Rack', 'Back shackle'). Suffix codes or annotations like '141', '3X', '2B', '2W', '1R', 'M&O' are part codes or notes, NEVER quantities or multipliers! Do not invent high quantities like 8 pcs or 3 pcs from part codes.\n"
-            "    - Rightmost Column: The monetary price in Naira (NGN) for that specific line item. Trace across the row carefully to align the correct name with the correct price.\n"
-            "  * If a date is written on the paper/document (e.g. '30/9/026' or '30/09/2026' -> '2026-09-30'), extract it and pass it to `occurred_at_date`.\n"
+            "  * CRITICAL STRICT LINE AMOUNT RULE: The monetary figure written in the amount column on the right IS THE FINAL LINE TOTAL. NEVER multiply the written price by quantity, units, packaging, or product reference codes! The written figure (e.g. 13,000, 26,000, 10,000, 36,000) is ALREADY the final monetary amount for that line. If a line says '8 pcs Oil & gas 36,000', the line amount is ₦36,000 (NOT 8 * 36,000). Traders and bookkeepers write the total line price directly.\n"
+            "  * UNDERSTAND GENERAL BUSINESS LEDGER LAYOUT & NOTATIONS:\n"
+            "    - Far Left Column: Quantity and packaging unit (e.g., '1 set', '1 pc', '2 bags', '8 pcs', '1 carton', '1'). Keep quantity as written. 'set' represents 1 complete set/kit (quantity: 1, unit: 'set').\n"
+            "    - Middle Columns: Product/item name and specifications/reference codes/tags (e.g. product models, sizes, brand names, serial codes). Include codes/specifications in the item description or name, NEVER treat them as multipliers or quantities.\n"
+            "    - Rightmost Column: The monetary price in Naira (NGN) for that specific line item. Trace across the row carefully to align each product horizontally with its exact price.\n"
+            "    - Section Dates: If dates are written in the margins or rows (e.g. '01/10/026' -> '2026-10-01', '02/10/026' -> '2026-10-02'), apply the corresponding date to the transactions under that date section.\n"
+            "  * MATHEMATICAL RECONCILIATION WITH WRITTEN TOTALS: Check if there is a written grand total or section total on the page. Sum up your extracted line amounts! If your line item sum differs from the handwritten total on the page, RECONCILE THEM: re-examine ambiguous handwritten digits, check for crossed-out or corrected lines (use the final corrected figure), and ensure each line's price is paired with the exact item on the same horizontal row.\n"
+            "  * DETERMINING RECORD TYPE (SALES VS EXPENSES):\n"
+            "    - If the page header is 'SINGLE CASH', 'CASH SALES', 'DAILY SALES', 'SALES RECORD', or if the user caption says 'Sales made' or lists goods sold, set record_type='sale'.\n"
+            "    - Only set record_type='expense' if the document explicitly says 'Expenses', 'Purchases', 'Bills', or user says 'Expenses made'.\n"
             "  * ALWAYS call the `record_batch_transactions` tool with all line items in the list.\n"
             "- SINGLE-ITEM RECEIPT / EXPENSE: When the photo or message contains only 1 single good or expense, call `record_transaction` with the specific item name, amount, and occurred_at_date if written.\n"
             "- GENERAL PHOTO / SCENE / OBJECT: When the user sends any general photo, scene, or object, describe it conversationally using multimodal vision.\n\n"

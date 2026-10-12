@@ -13,6 +13,7 @@ from app.core.database import async_session_factory
 from app.core.exceptions import AppError, VoiceTranscriptionError
 from app.core.sanitization import SanitizationError, validate_extraction_input
 from app.models.business import Business
+from app.models.confirmation import Confirmation
 from app.models.transaction import Transaction
 from app.models.user import User
 from app.schemas.extraction import ExtractedRecord
@@ -25,7 +26,7 @@ from app.services.confirmation_service import (
     normalize_confirmation_reply,
 )
 from app.schemas.actor import ActorContext
-from app.utils.currency import parse_money_amount
+from app.utils.currency import parse_money_amount, format_naira
 from app.utils.idempotency import idempotency_key, is_duplicate_message
 from app.utils.phone import normalize_phone
 from app.services.access_control_service import AccessControlService
@@ -49,6 +50,43 @@ from app.services.whatsapp_parser import parse_webhook_payload
 
 logger = logging.getLogger(__name__)
 
+
+def detect_type_flip_intent(text: str) -> str | None:
+    """
+    Detects if the user wants to switch/flip their recent records
+    between 'sale' and 'expense'.
+    e.g. 'These are sales, not expenses' -> 'sale'
+         'Change to expenses' -> 'expense'
+    """
+    if not text:
+        return None
+    cleaned = text.strip().lower()
+
+    to_sale_patterns = [
+        r"\b(?:these|those|they|it|this|entries|records|items)?\s*(?:are|is|be|was|should be|na)?\s*sales?\b.*?\b(?:not|no be)\s*expenses?\b",
+        r"\b(?:not|no be)\s*expenses?\b.*?\b(?:these|those|they|it|this)?\s*(?:are|is|be|was|should be|na)?\s*sales?\b",
+        r"\b(?:change|switch|convert|make|record)\s+(?:them|all|it|these|those)?\s*(?:to|as)?\s*sales?\b",
+        r"^(?:these|those|they|it|this)\s*(?:are|is|was|na)\s*sales?$",
+        r"^sales?,\s*not\s*expenses?$",
+        r"^sales?\s+not\s+expenses?$",
+    ]
+    for pat in to_sale_patterns:
+        if re.search(pat, cleaned):
+            return "sale"
+
+    to_expense_patterns = [
+        r"\b(?:these|those|they|it|this|entries|records|items)?\s*(?:are|is|be|was|should be|na)?\s*expenses?\b.*?\b(?:not|no be)\s*sales?\b",
+        r"\b(?:not|no be)\s*sales?\b.*?\b(?:these|those|they|it|this)?\s*(?:are|is|be|was|should be|na)?\s*expenses?\b",
+        r"\b(?:change|switch|convert|make|record)\s+(?:them|all|it|these|those)?\s*(?:to|as)?\s*expenses?\b",
+        r"^(?:these|those|they|it|this)\s*(?:are|is|was|na)\s*expenses?$",
+        r"^expenses?,\s*not\s*sales?$",
+        r"^expenses?\s+not\s+sales?$",
+    ]
+    for pat in to_expense_patterns:
+        if re.search(pat, cleaned):
+            return "expense"
+
+    return None
 
 
 class WhatsAppWebhookProcessor:
@@ -532,6 +570,35 @@ class WhatsAppWebhookProcessor:
                 msg = "⚠️ I received your voice note but couldn't detect any audible speech to transcribe. Please try sending again or type your message."
                 send_result = await self.whatsapp.send_text(parsed.from_phone, msg)
                 await self.ledger.record_outbound_message(db, business.id, parsed.from_phone, msg, send_result, user_id=user.id)
+            return
+
+        # Check for post-confirmation sale/expense type flipping (e.g. "These are sales, not expenses")
+        flip_reply, flip_txs = await self._try_handle_post_confirmation_flip(
+            db, business=business, source_text=source_text
+        )
+        if flip_reply:
+            inbound.status = "processed"
+            if hasattr(db, "commit"):
+                await db.commit()
+            elif hasattr(db, "flush"):
+                await db.flush()
+
+            if flip_txs and flip_txs[0].transaction_type == "sale":
+                send_result = await self.whatsapp.send_interactive_buttons(
+                    parsed.from_phone,
+                    flip_reply,
+                    [(f"receipt_{flip_txs[0].id}", "📄 Send receipt")],
+                )
+            else:
+                send_result = await self.whatsapp.send_text(parsed.from_phone, flip_reply)
+
+            await self.ledger.record_outbound_message(
+                db, business.id, parsed.from_phone, flip_reply, send_result, user_id=user.id
+            )
+            if hasattr(db, "commit"):
+                await db.commit()
+            elif hasattr(db, "flush"):
+                await db.flush()
             return
 
         # Check for receipt request button or keyword
@@ -1081,7 +1148,8 @@ class WhatsAppWebhookProcessor:
                 for w in [
                     "change", "edit", "correct", "make it", "instead", "amount", "price",
                     "quantity", "was", "actually", "naira", "ngn", "sold", "spent", "paid",
-                    "not", "is", "items", "item", "set", "sets", "wrong", "mistake"
+                    "not", "is", "items", "item", "set", "sets", "wrong", "mistake",
+                    "sale", "sales", "expense", "expenses"
                 ]
             )
 
@@ -1096,19 +1164,20 @@ class WhatsAppWebhookProcessor:
                 for name in item_names
             )
 
+            is_type_flip = bool(detect_type_flip_intent(parsed.body))
             is_correction_intent = False
             if is_in_edit_state:
                 if not (inferred_intent in unrelated_intents and not has_edit_keyword and not mentions_staged_item):
                     is_correction_intent = True
             elif is_pending_state:
-                if (has_edit_keyword and mentions_staged_item) or (mentions_staged_item and re.search(r"\d+", lower_body)):
+                if (has_edit_keyword and mentions_staged_item) or (mentions_staged_item and re.search(r"\d+", lower_body)) or is_type_flip:
                     is_correction_intent = True
 
             if is_correction_intent:
                 try:
                     validated_body = validate_extraction_input(parsed.body)
                 except SanitizationError:
-                    return "Invalid input. Please describe your edit clearly (e.g. 'Ends and socket is 30,000')."
+                    return "Invalid input. Please describe your edit clearly (e.g. 'Rice is 75,000' or 'Change price of Bread to 1,200')."
 
                 corrected = await self.extractor.apply_correction(
                     ref_record,
@@ -1150,6 +1219,89 @@ class WhatsAppWebhookProcessor:
                 return new_confirmation.confirmation_text
 
         return None
+
+    async def _try_handle_post_confirmation_flip(
+        self,
+        db: AsyncSession,
+        business: Business,
+        source_text: str,
+    ) -> tuple[str | None, list[Transaction]]:
+        target_type = detect_type_flip_intent(source_text)
+        if not target_type:
+            return None, []
+
+        stmt = (
+            select(Confirmation)
+            .where(
+                Confirmation.business_id == business.id,
+                Confirmation.status == "confirmed",
+            )
+            .order_by(Confirmation.confirmed_at.desc().nullslast(), Confirmation.created_at.desc())
+            .limit(1)
+        )
+        conf_res = await db.execute(stmt)
+        latest_conf = conf_res.scalar_one_or_none()
+
+        txs: list[Transaction] = []
+        if latest_conf:
+            tx_stmt = (
+                select(Transaction)
+                .where(Transaction.confirmation_id == latest_conf.id)
+                .order_by(Transaction.occurred_at.asc())
+            )
+            tx_res = await db.execute(tx_stmt)
+            txs = list(tx_res.scalars().all())
+
+        if not txs:
+            cutoff = datetime.now(UTC) - timedelta(hours=4)
+            recent_stmt = (
+                select(Transaction)
+                .where(
+                    Transaction.business_id == business.id,
+                    Transaction.status == "confirmed",
+                    Transaction.created_at >= cutoff,
+                )
+                .order_by(Transaction.created_at.desc())
+                .limit(50)
+            )
+            txs = list((await db.execute(recent_stmt)).scalars().all())
+
+        if not txs:
+            return None, []
+
+        # Check if already target type
+        if all(t.transaction_type == target_type for t in txs):
+            plural = "sales" if target_type == "sale" else "expenses"
+            return f"These records are already saved as {plural}.", txs
+
+        old_type = txs[0].transaction_type
+        old_plural = "expenses" if old_type == "expense" else "sales"
+        new_plural = "sales" if target_type == "sale" else "expenses"
+
+        for t in txs:
+            t.transaction_type = target_type
+            t.updated_at = datetime.now(UTC)
+            if target_type == "expense":
+                t.is_credit = False
+                t.customer_id = None
+
+        if latest_conf and isinstance(latest_conf.extracted_record, dict):
+            rec = dict(latest_conf.extracted_record)
+            rec["record_type"] = target_type
+            rec["transaction_type"] = target_type
+            if "items" in rec and isinstance(rec["items"], list):
+                for it in rec["items"]:
+                    if isinstance(it, dict):
+                        it["transaction_type"] = target_type
+                        it["record_type"] = target_type
+            latest_conf.extracted_record = rec
+
+        total_amount = sum((t.amount or Decimal("0")) for t in txs)
+        reply_msg = (
+            f"✅ Done! I have updated all {len(txs)} records ({format_naira(total_amount)}) "
+            f"from {old_plural} to *{new_plural}*."
+        )
+        return reply_msg, txs
 
     async def _try_handle_alarm_button(
         self,

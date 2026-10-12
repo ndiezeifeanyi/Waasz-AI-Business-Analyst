@@ -42,28 +42,28 @@ def test_parse_occurred_at_date():
 
 
 def test_build_confirmation_text_formatting():
-    # 20 items list
+    # 40 items list to test truncation beyond display limit of 35
     items = [
         LineItemRecord(item_name=f"Part #{i}", quantity=Decimal(f"{i}"), unit="pcs", amount=Decimal(f"{i * 1000}"))
-        for i in range(1, 21)
+        for i in range(1, 41)
     ]
     record = ExtractedRecord(
         record_type="sale",
-        amount=Decimal("210000"),
-        item_name="20 items batch",
+        amount=Decimal("820000"),
+        item_name="40 items batch",
         items=items,
         occurred_at_date="2026-09-30",
         customer_name="Alhaji Danladi",
     )
     conf_text = build_confirmation_text(record)
     print("Formatted Confirmation Text:\n" + conf_text)
-    assert "Please confirm 20 item sales:" in conf_text
+    assert "Please confirm 40 item sales:" in conf_text
     assert "📅 Date: 2026-09-30" in conf_text
     assert "👤 Customer: Alhaji Danladi" in conf_text
     assert "1. Part #1 (1 pcs) - ₦1,000" in conf_text
-    assert "15. Part #15 (15 pcs) - ₦15,000" in conf_text
+    assert "35. Part #35 (35 pcs) - ₦35,000" in conf_text
     assert "... and 5 more items" in conf_text
-    assert "💰 Grand Total: ₦210,000" in conf_text
+    assert "💰 Grand Total: ₦820,000" in conf_text
     assert "Reply 1=Yes, 2=Edit, 3=Cancel." in conf_text
     print("test_build_confirmation_text_formatting PASSED!")
 
@@ -135,7 +135,7 @@ async def test_end_to_end_batch_staging_and_confirmation():
         await db.commit()
 
         assert confirmation.status == "pending"
-        assert "... and 3 more items" in confirmation.confirmation_text
+        assert "18. Engine Oil Filter #18" in confirmation.confirmation_text
 
         # Verify staged transactions in database
         from sqlalchemy import select

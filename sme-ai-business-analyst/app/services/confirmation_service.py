@@ -56,7 +56,7 @@ def build_confirmation_text(record: ExtractedRecord) -> str:
         if record.customer_name:
             lines.append(f"👤 Customer: {record.customer_name}")
 
-        display_limit = 15
+        display_limit = 35
         for idx, it in enumerate(record.items[:display_limit], 1):
             qty_str = f"{it.quantity:g} " if it.quantity is not None else ""
             unit_str = f"{it.unit} " if it.unit else ""
@@ -267,13 +267,18 @@ class ConfirmationService:
         rec = confirmation.extracted_record or {}
         items = rec.get("items") or []
         if items and len(items) > 1:
+            ex1 = items[0].get("item_name") or "Item 1"
+            ex2 = items[1].get("item_name") or "Item 2" if len(items) > 1 else ex1
+            amt_val = items[0].get("amount") or 5000
+            p1 = f"{float(amt_val):,.0f}"
             return (
-                "No wahala. Type what needs to be changed (e.g. 'Ends and socket is 30,000' or 'Shock pad is 26,000'). "
+                f"No wahala. Type what needs to be changed (e.g. '{ex1} is ₦{p1}' or 'Change price of {ex2}'). "
                 "I will update those items and keep the rest."
             )
+        ex_name = rec.get("item_name") or "this item"
+        ex_amt = f"{float(rec.get('amount') or 5000):,.0f}"
         return (
-            "No wahala. Please type the corrected record in one message, e.g. "
-            "Sold 5 bags rice for ₦250000 or Change price to ₦5000."
+            f"No wahala. Type what needs to be changed (e.g. 'Change amount to ₦{ex_amt}' or 'Item is {ex_name}')."
         )
 
     async def cancel(self, db: AsyncSession, confirmation: Confirmation) -> str:
