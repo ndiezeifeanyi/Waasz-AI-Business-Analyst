@@ -46,7 +46,7 @@ from app.services.task_service import TaskService
 from app.services.unified_report_service import UnifiedReportService
 from app.services.voice_service import VoiceService
 from app.services.whatsapp_client import WhatsAppClient
-from app.services.whatsapp_parser import parse_webhook_payload
+from app.services.whatsapp_parser import parse_webhook_payload, parse_webhook_statuses
 
 logger = logging.getLogger(__name__)
 
@@ -144,9 +144,21 @@ class WhatsAppWebhookProcessor:
 
     async def process_payload(self, payload: dict) -> None:
         messages = parse_webhook_payload(payload)
+        statuses = parse_webhook_statuses(payload)
         async with async_session_factory() as db:
             event = await self.ledger.create_webhook_event(db, payload)
             await db.commit()
+
+            # Process asynchronous delivery, read, and failure callbacks
+            if statuses:
+                for status_item in statuses:
+                    try:
+                        await self.ledger.update_message_status(db, status_item)
+                    except Exception as s_exc:
+                        logger.warning("Failed to update message status for %s: %s", status_item.message_id, s_exc)
+                event.status = "processed"
+                await db.commit()
+
             for parsed in messages:
                 try:
                     await self.process_message(db, parsed, event)

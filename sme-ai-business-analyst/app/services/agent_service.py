@@ -11,6 +11,7 @@ import re
 from typing import Any
 from unittest.mock import Mock
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from langchain_core.messages import (
     AIMessage,
@@ -435,6 +436,20 @@ class AgentService:
         actor_role = actor.role if actor else getattr(user, "role", "owner")
         actor_display = (actor.display_name if actor else None) or user.display_name or "Friend"
 
+        try:
+            local_tz = ZoneInfo(business_tz)
+        except Exception:
+            local_tz = ZoneInfo("Africa/Lagos")
+        now_local = now_utc.astimezone(local_tz)
+
+        # Build upcoming 7-day calendar reference so LLM never hallucinates days of the week:
+        calendar_days = []
+        for offset in range(8):
+            day_dt = now_local + timedelta(days=offset)
+            prefix = "Today" if offset == 0 else ("Tomorrow" if offset == 1 else f"In {offset} days")
+            calendar_days.append(f"{day_dt.strftime('%A %d %b %Y')} ({prefix})")
+        calendar_preview = " | ".join(calendar_days)
+
         return (
             "You are Waasz (Waasz AI), an intelligent AI business analyst and financial copilot built specifically for African SMEs and business owners.\n"
             "### ORIGIN & ENGINEERING ARCHITECTURE:\n"
@@ -497,8 +512,11 @@ class AgentService:
             "- All business records are permanently stored in our secure encrypted cloud database tied to the user's registered phone number.\n"
             "- Changing phone numbers strictly requires admin-assisted account recovery.\n"
             "- Never send WhatsApp messages directly to customers; debt reminders are delivered to the owner to forward.\n\n"
-            f"### TIME CONTEXT:\n"
-            f"- Current UTC Time: {now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} | Business Timezone: {business_tz}\n\n"
+            "### TIME & CALENDAR CONTEXT (STRICT ACCURACY REQUIRED):\n"
+            f"- Current Local Time: {now_local.strftime('%A, %d %B %Y, %I:%M %p')} ({business_tz})\n"
+            f"- Current UTC Time: {now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+            f"- Upcoming Calendar Days: {calendar_preview}\n"
+            "- CRITICAL RULE FOR DATES: When the user asks for reminders or tasks (e.g. 'this coming Saturday', 'tomorrow', 'Friday'), cross-check against the Upcoming Calendar Days above so you never miscalculate dates!\n\n"
             f"### USER PROFILE & ROLE CONTEXT:\n"
             f"User display name: {actor_display} | Role: {actor_role} | Niche: {niche_key}\n"
             f"{'You are interacting with a staff member. They record sales and expenses for the business.' if actor_role == 'staff' else 'You are interacting with the business owner with full management access.'}\n"
@@ -916,17 +934,16 @@ class AgentService:
                 is_alarm_arg = tool_args.get("is_alarm", False)
                 repeat_interval_seconds = int(tool_args.get("repeat_interval_seconds") or 60)
 
-                due_at_utc = None
-                if due_at_iso:
+                # 1. Deterministic local parser takes FIRST precedence over LLM-generated ISO
+                due_at_utc = parse_reminder_time(raw_user_text, timezone_name=business_tz)
+
+                # 2. Fallback to LLM ISO parse only if deterministic parser could not extract a time
+                if not due_at_utc and due_at_iso:
                     try:
                         clean_iso = due_at_iso.replace("Z", "+00:00")
                         due_at_utc = datetime.fromisoformat(clean_iso)
                     except Exception:
                         due_at_utc = None
-
-                # Fallback to local reminder parser if ISO parse failed
-                if not due_at_utc:
-                    due_at_utc = parse_reminder_time(raw_user_text, timezone_name=business_tz)
 
                 if not due_at_utc:
                     return (

@@ -14,6 +14,16 @@ class ParsedWhatsAppMessage(BaseModel):
     raw_payload: dict = {}
 
 
+class ParsedWhatsAppStatus(BaseModel):
+    message_id: str
+    recipient_id: str | None = None
+    status: str
+    timestamp: datetime | None = None
+    error_code: int | None = None
+    error_message: str | None = None
+    raw_payload: dict = {}
+
+
 class WhatsAppSendResult(BaseModel):
     message_id: str | None = None
     skipped: bool = False

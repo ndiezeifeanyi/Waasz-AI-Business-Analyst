@@ -80,6 +80,14 @@ def clean_reminder_input(text: str) -> str:
     for pattern in filler_patterns:
         cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
 
+    # Normalize relative weekday phrases like 'this coming Saturday', 'coming Saturday', 'this Saturday'
+    cleaned = re.sub(
+        r"\b(?:this\s+coming|coming|this)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        r"\1",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
     # Apply pidgin replacements
     for pattern, replacement in PIDGIN_TIME_REPLACEMENTS:
         cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
@@ -105,7 +113,7 @@ def parse_reminder_time(
     Parse a natural-language time string into a UTC datetime.
     
     Args:
-        text: Natural language string (e.g. "in 2 hours", "tomorrow at 3pm", "next tomorrow by 4pm")
+        text: Natural language string (e.g. "in 2 hours", "tomorrow at 3pm", "this coming Saturday by 5:30pm")
         base_time: Reference time for relative calculations (defaults to current time in specified timezone)
         timezone_name: Local timezone name for the business (default "Africa/Lagos")
         
@@ -138,7 +146,63 @@ def parse_reminder_time(
         "RELATIVE_BASE": now_local.replace(tzinfo=None),
     }
 
+    # 1. Direct parse (works when string is purely temporal, e.g. "tomorrow at 3pm")
     parsed = dateparser.parse(cleaned, settings=settings)
+
+    # 2. Check for relative duration expressions (e.g. "in 2 hours to check generator")
+    if not parsed:
+        rel_match = re.search(
+            r"\b(?:in|after)\s+\d+\s*(?:sec|second|min|minute|hr|hour|day|week|month)s?\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if rel_match:
+            parsed = dateparser.parse(rel_match.group(0), settings=settings)
+
+    # 3. Composite pattern: <day/date> to <task> [by/at] <time>
+    # e.g. "Saturday to pick up my cloth from dry cleaner by 5:30pm"
+    if not parsed:
+        match_a = re.match(
+            r"^((?:today|tomorrow|in \d+ days?|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\s+to\s+.*?(?:by|at)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if match_a:
+            temporal_str = f"{match_a.group(1)} at {match_a.group(2)}"
+            parsed = dateparser.parse(temporal_str, settings=settings)
+
+    # 4. Composite pattern: to <task> <day/date> [by/at] <time>
+    # e.g. "to pick up cloth Saturday by 5:30pm"
+    if not parsed:
+        match_b = re.search(
+            r"(?:on\s+)?((?:today|tomorrow|in \d+ days?|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\s*(?:by|at)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if match_b:
+            temporal_str = f"{match_b.group(1)} at {match_b.group(2)}"
+            parsed = dateparser.parse(temporal_str, settings=settings)
+
+    # 5. General search for day and time tokens in composite sentences
+    if not parsed:
+        time_trailer = re.search(
+            r"\b(?:at|by|around)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        day_match = re.search(
+            r"\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if day_match and time_trailer:
+            temporal_str = f"{day_match.group(0)} {time_trailer.group(0)}"
+            parsed = dateparser.parse(temporal_str, settings=settings)
+        elif day_match:
+            # Default to 9:00 AM on that day
+            temporal_str = f"{day_match.group(0)} at 9am"
+            parsed = dateparser.parse(temporal_str, settings=settings)
+
     if not parsed:
         return None
 

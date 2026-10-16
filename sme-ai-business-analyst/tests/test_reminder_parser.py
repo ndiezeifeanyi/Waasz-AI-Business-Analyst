@@ -99,3 +99,56 @@ def test_ambiguous_time_expressions():
     assert is_ambiguous_time_expression("remind me in 30 mins") is False
     assert is_ambiguous_time_expression("tomorrow at 9am") is False
     assert is_ambiguous_time_expression("by 3pm") is False
+
+
+def test_relative_weekday_and_composite_task_reminders():
+    # Tuesday, October 13, 2026, 16:22:58 WAT (15:22:58 UTC)
+    base_tue = datetime(2026, 10, 13, 15, 22, 58, tzinfo=UTC)
+
+    # 1. User's exact prompt: "Remind me this coming Saturday to pick up my cloth from dry cleaner by 5:30pm"
+    # This coming Saturday is Oct 17, 2026. 5:30pm WAT is 16:30 UTC.
+    parsed = parse_reminder_time(
+        "Remind me this coming Saturday to pick up my cloth from dry cleaner by 5:30pm",
+        base_time=base_tue,
+        timezone_name="Africa/Lagos",
+    )
+    assert parsed is not None
+    assert parsed == datetime(2026, 10, 17, 16, 30, 0, tzinfo=UTC)
+
+    # 2. Inverted phrasing: task first, date second
+    parsed2 = parse_reminder_time(
+        "Remind me to pick up my cloth from dry cleaner this coming Saturday by 5:30pm",
+        base_time=base_tue,
+        timezone_name="Africa/Lagos",
+    )
+    assert parsed2 is not None
+    assert parsed2 == datetime(2026, 10, 17, 16, 30, 0, tzinfo=UTC)
+
+    # 3. "Remind me coming Friday by 2pm to call accountant"
+    # Coming Friday is Oct 16, 2026. 2pm WAT is 13:00 UTC.
+    parsed3 = parse_reminder_time(
+        "Remind me coming Friday by 2pm to call accountant",
+        base_time=base_tue,
+        timezone_name="Africa/Lagos",
+    )
+    assert parsed3 is not None
+    assert parsed3 == datetime(2026, 10, 16, 13, 0, 0, tzinfo=UTC)
+
+    # 4. "Remind me this Saturday 10am"
+    parsed4 = parse_reminder_time(
+        "Remind me this Saturday 10am",
+        base_time=base_tue,
+        timezone_name="Africa/Lagos",
+    )
+    assert parsed4 is not None
+    assert parsed4 == datetime(2026, 10, 17, 9, 0, 0, tzinfo=UTC)
+
+    # 5. Relative duration with task: "Remind me in 2 hours to check generator"
+    parsed5 = parse_reminder_time(
+        "Remind me in 2 hours to check generator",
+        base_time=base_tue,
+        timezone_name="Africa/Lagos",
+    )
+    assert parsed5 is not None
+    assert parsed5 == base_tue + timedelta(hours=2)
+

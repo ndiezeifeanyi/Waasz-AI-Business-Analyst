@@ -70,6 +70,12 @@ except (ValueError, TypeError):
     spend_disp = "$0.0000"
 col6.metric("AI Spend Today", spend_disp, help="Accurate AI model API cost calculated from today's token usage")
 
+failed_recent_df = query_df("select count(*) as cnt from whatsapp_messages where status = 'failed' and created_at >= now() - interval '24 hours'")
+if not failed_recent_df.empty:
+    fail_cnt_24h = int(failed_recent_df.iloc[0].get("cnt", 0) or 0)
+    if fail_cnt_24h > 0:
+        st.error(f"🚨 **Action Required**: {fail_cnt_24h} WhatsApp outbound message(s) failed delivery in the last 24 hours! Open the **💬 Messages** tab to view the exact Meta failure reasons.")
+
 businesses = query_df(
     """
     select id::text, name, phone_number, business_type, subscription_plan, created_at
@@ -457,24 +463,128 @@ with tab_confirmations:
     st.dataframe(confirmations, use_container_width=True, hide_index=True)
 
 with tab_messages:
-    messages = query_df(
+    st.subheader("💬 WhatsApp Messages & Live Delivery Pulse")
+    st.caption("Real-time monitoring of all inbound and outbound WhatsApp messages, Meta delivery receipts, read receipts, and error diagnostics.")
+
+    # 1. Delivery health pulse (last 24h & 7d)
+    stats_df = query_df(
+        f"""
+        select
+            count(*) filter (where direction = 'inbound') as inbound_count,
+            count(*) filter (where direction = 'outbound') as outbound_count,
+            count(*) filter (where direction = 'outbound' and status in ('delivered', 'read')) as delivered_count,
+            count(*) filter (where direction = 'outbound' and status = 'read') as read_count,
+            count(*) filter (where direction = 'outbound' and status = 'sent') as pending_count,
+            count(*) filter (where direction = 'outbound' and status = 'failed') as failed_count
+        from whatsapp_messages
+        where created_at >= now() - interval '24 hours'
+        {"and business_id = %s" if selected_business_id else ""}
+        """,
+        params,
+    )
+
+    if not stats_df.empty:
+        s_row = stats_df.iloc[0]
+        m_in = int(s_row.get("inbound_count", 0) or 0)
+        m_out = int(s_row.get("outbound_count", 0) or 0)
+        m_deliv = int(s_row.get("delivered_count", 0) or 0)
+        m_read = int(s_row.get("read_count", 0) or 0)
+        m_pend = int(s_row.get("pending_count", 0) or 0)
+        m_fail = int(s_row.get("failed_count", 0) or 0)
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Inbound (24h)", m_in, help="Messages received from users in the last 24h")
+        c2.metric("Outbound (24h)", m_out, help="Total messages dispatched by the system in the last 24h")
+        c3.metric("Delivered / Read", f"{m_deliv} ({m_read} read)", help="Messages confirmed delivered or read on WhatsApp")
+        c4.metric("Pending Meta Ack", m_pend, help="Messages accepted by Meta Cloud API awaiting delivery callback")
+        c5.metric("Failed Deliveries", m_fail, delta=f"-{m_fail}" if m_fail > 0 else "0", delta_color="inverse", help="Messages rejected or failed by Meta Cloud API")
+
+        if m_fail > 0:
+            st.error(f"🚨 **{m_fail} Outbound Message(s) Failed in the Last 24 Hours!** Check below for exact Meta failure codes (e.g. 131049 marketing cap, 131047 24h window closed, or 132001 missing template).")
+
+    # 2. Filter & Controls
+    col_f1, col_f2 = st.columns([2, 1])
+    with col_f1:
+        status_filter = st.selectbox(
+            "Filter Messages by Delivery Status",
+            ["All", "🔴 Failed Only", "🟢 Read / Delivered", "🟡 Sent (Pending)", "📥 Inbound Only", "📤 Outbound Only"],
+            key="msg_status_filter",
+        )
+    with col_f2:
+        msg_search = st.text_input("🔍 Search Text or Phone", placeholder="Phone number, keyword...", key="msg_search_input")
+
+    where_clauses = []
+    query_params = list(params)
+    if selected_business_id:
+        where_clauses.append("m.business_id = %s")
+
+    if status_filter == "🔴 Failed Only":
+        where_clauses.append("m.status = 'failed'")
+    elif status_filter == "🟢 Read / Delivered":
+        where_clauses.append("m.status in ('read', 'delivered')")
+    elif status_filter == "🟡 Sent (Pending)":
+        where_clauses.append("m.status = 'sent'")
+    elif status_filter == "📥 Inbound Only":
+        where_clauses.append("m.direction = 'inbound'")
+    elif status_filter == "📤 Outbound Only":
+        where_clauses.append("m.direction = 'outbound'")
+
+    if msg_search.strip():
+        search_term = f"%{msg_search.strip()}%"
+        where_clauses.append("(m.body ilike %s or m.from_phone ilike %s or m.to_phone ilike %s or m.error_message ilike %s)")
+        query_params.extend([search_term, search_term, search_term, search_term])
+
+    where_sql = ("where " + " and ".join(where_clauses)) if where_clauses else ""
+
+    messages_df = query_df(
         f"""
         select
             m.created_at,
             b.name as business,
+            coalesce(m.to_phone, m.from_phone) as phone_number,
             m.direction,
-            m.message_type,
             m.status,
+            m.error_message,
             coalesce(m.body, m.interactive_reply_id, m.media_id) as content
         from whatsapp_messages m
         left join businesses b on b.id = m.business_id
-        {"where m.business_id = %s" if selected_business_id else ""}
+        {where_sql}
         order by m.created_at desc
-        limit 100
+        limit 150
         """,
-        params,
+        tuple(query_params),
     )
-    st.dataframe(messages, use_container_width=True, hide_index=True)
+
+    if not messages_df.empty:
+        # Visual status format
+        def _fmt_status(s: str) -> str:
+            st_clean = str(s or "").lower()
+            if st_clean == "read":
+                return "🟢 Read"
+            elif st_clean == "delivered":
+                return "🔵 Delivered"
+            elif st_clean == "sent":
+                return "🟡 Sent"
+            elif st_clean == "failed":
+                return "🔴 Failed"
+            elif st_clean == "processed":
+                return "✅ Inbound"
+            return st_clean
+
+        messages_df["Delivery Status"] = messages_df["status"].apply(_fmt_status)
+
+        # Highlight errors if failed messages exist in current view
+        failed_subset = messages_df[messages_df["status"] == "failed"]
+        if not failed_subset.empty:
+            with st.expander(f"⚠️ View Error Diagnostics ({len(failed_subset)} Failed Messages Shown)", expanded=True):
+                err_counts = failed_subset["error_message"].value_counts().reset_index()
+                err_counts.columns = ["Meta Error Message / Reason", "Occurrences"]
+                st.dataframe(err_counts, use_container_width=True, hide_index=True)
+
+        disp_cols = ["created_at", "business", "phone_number", "direction", "Delivery Status", "error_message", "content"]
+        st.dataframe(messages_df[disp_cols], use_container_width=True, hide_index=True)
+    else:
+        st.info("No messages match the selected filters.")
 
 with tab_simulator:
     st.subheader("🤖 Interactive WhatsApp Bot Simulator")

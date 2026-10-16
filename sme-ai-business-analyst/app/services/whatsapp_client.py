@@ -222,7 +222,18 @@ class WhatsAppClient:
                 "components": components or [],
             },
         }
-        return await self._post(payload)
+        res = await self._post(payload)
+
+        # If failed with translation/language mismatch (132001), automatically try alternate english code
+        if not res.success and res.error_message and "132001" in res.error_message:
+            alt_lang = "en_US" if language_code == "en" else ("en" if language_code == "en_US" else None)
+            if alt_lang:
+                payload["template"]["language"]["code"] = alt_lang
+                res_alt = await self._post(payload)
+                if res_alt.success:
+                    return res_alt
+
+        return res
 
     async def verify_waba_oba_status(self) -> dict:
         """

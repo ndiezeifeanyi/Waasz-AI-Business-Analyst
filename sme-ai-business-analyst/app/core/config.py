@@ -83,8 +83,8 @@ class Settings(BaseSettings):
     # Image Generation Flag (cost control)
     enable_image_generation: bool = False
 
-    # Alarm Escalation Mode Default
-    default_reminders_to_alarm_mode: bool = True
+    # Alarm Escalation Mode Default (False = single alert; True = repeating alarm)
+    default_reminders_to_alarm_mode: bool = False
 
     # Cost Limits
     daily_ai_spend_limit_usd: float = Field(default=5.0, ge=0)

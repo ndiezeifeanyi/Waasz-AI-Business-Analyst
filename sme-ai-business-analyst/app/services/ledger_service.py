@@ -24,7 +24,7 @@ from app.models.user import User
 from app.models.webhook import WebhookEvent
 from app.schemas.actor import ActorContext
 from app.schemas.extraction import ExtractedRecord
-from app.schemas.whatsapp import ParsedWhatsAppMessage, WhatsAppSendResult
+from app.schemas.whatsapp import ParsedWhatsAppMessage, ParsedWhatsAppStatus, WhatsAppSendResult
 from app.services.confirmation_service import build_confirmation_text
 from app.utils.phone import normalize_phone
 
@@ -330,6 +330,51 @@ class LedgerService:
         db.add(message)
         await db.flush()
         return message
+
+    async def update_message_status(
+        self,
+        db: AsyncSession,
+        status_event: ParsedWhatsAppStatus,
+    ) -> WhatsAppMessage | None:
+        """
+        Updates the status (delivered, read, failed) of an existing WhatsApp message
+        based on asynchronous Meta status callback webhooks.
+        """
+        if not status_event.message_id:
+            return None
+
+        stmt = select(WhatsAppMessage).where(
+            WhatsAppMessage.whatsapp_message_id == status_event.message_id
+        ).limit(1)
+        res = await db.execute(stmt)
+        msg = res.scalar_one_or_none()
+        if not msg:
+            return None
+
+        current_status = msg.status
+        new_status = status_event.status.lower()
+
+        status_weights = {
+            "queued": 1,
+            "received": 1,
+            "sent": 2,
+            "delivered": 3,
+            "read": 4,
+            "failed": 5,
+        }
+
+        curr_weight = status_weights.get(current_status, 0)
+        new_weight = status_weights.get(new_status, 0)
+
+        # Transition forward, or immediately record failure
+        if new_status == "failed" or new_weight >= curr_weight:
+            msg.status = new_status
+            if status_event.error_message:
+                code_prefix = f"Meta Error ({status_event.error_code}): " if status_event.error_code else "Meta Error: "
+                msg.error_message = f"{code_prefix}{status_event.error_message}"
+            await db.flush()
+
+        return msg
 
     async def create_ai_extraction(
         self,

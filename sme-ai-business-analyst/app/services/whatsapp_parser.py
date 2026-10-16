@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from app.schemas.whatsapp import ParsedWhatsAppMessage
+from app.schemas.whatsapp import ParsedWhatsAppMessage, ParsedWhatsAppStatus
 
 
 def parse_webhook_payload(payload: dict) -> list[ParsedWhatsAppMessage]:
@@ -13,6 +13,56 @@ def parse_webhook_payload(payload: dict) -> list[ParsedWhatsAppMessage]:
                 if parsed:
                     messages.append(parsed)
     return messages
+
+
+def parse_webhook_statuses(payload: dict) -> list[ParsedWhatsAppStatus]:
+    statuses: list[ParsedWhatsAppStatus] = []
+    for entry in payload.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            for status_item in value.get("statuses", []):
+                parsed = _parse_status(status_item)
+                if parsed:
+                    statuses.append(parsed)
+    return statuses
+
+
+def _parse_status(status_item: dict) -> ParsedWhatsAppStatus | None:
+    message_id = status_item.get("id")
+    status = status_item.get("status")
+    if not message_id or not status:
+        return None
+
+    recipient_id = status_item.get("recipient_id")
+    timestamp = None
+    if status_item.get("timestamp"):
+        try:
+            timestamp = datetime.fromtimestamp(int(status_item["timestamp"]), tz=UTC)
+        except (ValueError, TypeError):
+            pass
+
+    error_code = None
+    error_message = None
+    errors = status_item.get("errors", [])
+    if errors and isinstance(errors, list):
+        first_err = errors[0]
+        error_code = first_err.get("code")
+        title_or_msg = first_err.get("title") or first_err.get("message")
+        details = first_err.get("error_data", {}).get("details")
+        if details and details != title_or_msg:
+            error_message = f"{title_or_msg}: {details}"
+        else:
+            error_message = title_or_msg
+
+    return ParsedWhatsAppStatus(
+        message_id=message_id,
+        recipient_id=recipient_id,
+        status=status,
+        timestamp=timestamp,
+        error_code=error_code,
+        error_message=error_message,
+        raw_payload=status_item,
+    )
 
 
 def _parse_message(message: dict) -> ParsedWhatsAppMessage | None:
