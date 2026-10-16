@@ -377,6 +377,8 @@ users_directory = query_df(
 
 selected_business_id = None
 selected_phone = None
+selected_business_id = None
+selected_phone = None
 selected_user_display = None
 user_labels = {}
 
@@ -386,6 +388,20 @@ if not users_directory.empty:
         ph = str(row["phone_number"] or "").strip()
         nm = str(row["business_name"] or "").strip()
         user_labels[b_id] = f"{ph} — {nm}"
+
+# Session State for User Scope
+if "user_scope_filter" not in st.session_state:
+    st.session_state["user_scope_filter"] = "GLOBAL_ALL"
+
+scope_keys = ["GLOBAL_ALL", *user_labels.keys()]
+
+def _scope_display_label(key):
+    if key == "GLOBAL_ALL":
+        return "🌐 All Users & Merchants (Global Overview)"
+    return f"👤 {user_labels.get(key, key)}"
+
+def _on_sb_scope_change():
+    st.session_state["user_scope_filter"] = st.session_state.get("sb_user_scope_selector", "GLOBAL_ALL")
 
 with st.sidebar:
     logo_file = Path(__file__).resolve().parent / "waasz_logo.jpg"
@@ -420,19 +436,17 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### 👤 Merchant & User Scope")
     if user_labels:
-        scope_choice = st.selectbox(
+        sb_val = st.session_state.get("user_scope_filter", "GLOBAL_ALL")
+        sb_idx = scope_keys.index(sb_val) if sb_val in scope_keys else 0
+        st.selectbox(
             "Select User / Business",
-            options=["All Users & Merchants (Global)", *user_labels.keys()],
-            format_func=lambda val: user_labels.get(val, val),
+            options=scope_keys,
+            index=sb_idx,
+            format_func=_scope_display_label,
             key="sb_user_scope_selector",
+            on_change=_on_sb_scope_change,
             help="Choose a specific merchant phone number to filter all tabs, metrics, live chat streams, and exports strictly to that user.",
         )
-        if scope_choice != "All Users & Merchants (Global)":
-            selected_business_id = scope_choice
-            selected_user_display = user_labels.get(scope_choice)
-            matched_user_row = users_directory[users_directory["business_id"] == scope_choice]
-            if not matched_user_row.empty:
-                selected_phone = str(matched_user_row.iloc[0]["phone_number"] or "").strip()
 
     st.markdown("---")
     st.markdown("#### ⚡ Telemetry Pulse")
@@ -448,6 +462,42 @@ with st.sidebar:
         time.sleep(15)
         st.cache_data.clear()
         st.rerun()
+
+# ---------------------------------------------------------------------------
+# Prominent In-Page User / Merchant Selector (Directly above tabs)
+# ---------------------------------------------------------------------------
+def _on_top_scope_change():
+    st.session_state["user_scope_filter"] = st.session_state.get("top_user_scope_selector", "GLOBAL_ALL")
+
+top_val = st.session_state.get("user_scope_filter", "GLOBAL_ALL")
+top_idx = scope_keys.index(top_val) if top_val in scope_keys else 0
+
+c_main_sc1, c_main_sc2 = st.columns([3, 1])
+with c_main_sc1:
+    st.selectbox(
+        "🎯 Focus Dashboard & Exports on Specific User / Merchant:",
+        options=scope_keys,
+        index=top_idx,
+        format_func=_scope_display_label,
+        key="top_user_scope_selector",
+        on_change=_on_top_scope_change,
+        help="Select any merchant phone number to filter all 7 tabs, WhatsApp chats, metrics, ledger audits, and data downloads strictly to that user."
+    )
+
+with c_main_sc2:
+    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+    if st.session_state.get("user_scope_filter", "GLOBAL_ALL") != "GLOBAL_ALL":
+        if st.button("🌐 Reset to All Users", key="top_reset_scope_btn", use_container_width=True):
+            st.session_state["user_scope_filter"] = "GLOBAL_ALL"
+            st.rerun()
+
+active_scope = st.session_state.get("user_scope_filter", "GLOBAL_ALL")
+if active_scope != "GLOBAL_ALL" and active_scope in user_labels:
+    selected_business_id = active_scope
+    selected_user_display = user_labels.get(active_scope)
+    matched_user_row = users_directory[users_directory["business_id"] == active_scope]
+    if not matched_user_row.empty:
+        selected_phone = str(matched_user_row.iloc[0]["phone_number"] or "").strip()
 
 business_filter = ""
 params: tuple = ()
@@ -782,10 +832,33 @@ with tab_messages:
         # Smart, uncluttered diagnostics drawer
         failed_subset = messages_df[messages_df["status"] == "failed"]
         if not failed_subset.empty:
-            with st.expander(f"🔍 Meta Delivery Error Breakdown ({len(failed_subset)} failures in current view)", expanded=(status_filter == "🔴 Failed Only")):
-                err_counts = failed_subset["error_message"].value_counts().reset_index()
-                err_counts.columns = ["Meta Error Message / Reason", "Occurrences"]
-                st.dataframe(err_counts, use_container_width=True, hide_index=True)
+            err_counts = failed_subset["error_message"].value_counts().reset_index()
+            err_counts.columns = ["Meta Error Message / Reason", "Occurrences"]
+            err_rows = []
+            for _, r in err_counts.iterrows():
+                err_msg = str(r["Meta Error Message / Reason"] or "Unknown Error")
+                occ = r["Occurrences"]
+                err_rows.append(
+                    f'<div style="display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,0.06);">'
+                    f'<span style="color: #F87171; font-family: monospace; font-size: 0.84rem; word-break: break-all;">{err_msg}</span>'
+                    f'<span style="background: rgba(239,68,68,0.2); color: #FCA5A5; font-size: 0.76rem; font-weight: 700; padding: 2px 8px; border-radius: 9999px; margin-left: 12px; white-space: nowrap;">{occ} failed</span>'
+                    f'</div>'
+                )
+            all_errs_html = "".join(err_rows)
+            open_attr = "open" if status_filter == "🔴 Failed Only" else ""
+            st.markdown(
+                f"""
+                <details {open_attr} style="background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 12px; padding: 12px 18px; margin: 12px 0 16px 0;">
+                    <summary style="font-weight: 600; cursor: pointer; color: #F87171; font-size: 0.92rem; outline: none;">
+                        ⚠️ Meta Delivery Error Diagnostics ({len(failed_subset)} failures in current view)
+                    </summary>
+                    <div style="margin-top: 10px;">
+                        {all_errs_html}
+                    </div>
+                </details>
+                """,
+                unsafe_allow_html=True,
+            )
 
         disp_cols = ["created_at", "business", "phone_number", "direction", "Delivery Status", "error_message", "content"]
         st.dataframe(messages_df[disp_cols], use_container_width=True, hide_index=True)
@@ -1246,10 +1319,48 @@ with tab_costs_knowledge:
 
     st.markdown("---")
     st.subheader("📥 Data Export & Download Center")
-    if selected_business_id:
-        biz_name = selected_user_display.split(" — ")[-1] if selected_user_display else "Merchant"
+    st.caption("Select any merchant from the dropdown below to immediately generate and download their individual transaction ledger, debts, WhatsApp chat logs, or bank-certified financial PDF statement. Or export complete platform-wide datasets.")
+
+    def _on_tab6_scope_change():
+        st.session_state["user_scope_filter"] = st.session_state.get("tab6_export_user_selector", "GLOBAL_ALL")
+
+    tab6_val = st.session_state.get("user_scope_filter", "GLOBAL_ALL")
+    tab6_idx = scope_keys.index(tab6_val) if tab6_val in scope_keys else 0
+
+    c_t6_sel1, c_t6_sel2 = st.columns([3, 1])
+    with c_t6_sel1:
+        st.selectbox(
+            "🎯 Select Merchant / User to Download Data For:",
+            options=scope_keys,
+            index=tab6_idx,
+            format_func=_scope_display_label,
+            key="tab6_export_user_selector",
+            on_change=_on_tab6_scope_change,
+            help="Choose a user to get their individual data files and certified loan statements."
+        )
+    with c_t6_sel2:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        if st.session_state.get("user_scope_filter", "GLOBAL_ALL") != "GLOBAL_ALL":
+            if st.button("🌐 Switch to Global View", key="tab6_reset_scope_btn", use_container_width=True):
+                st.session_state["user_scope_filter"] = "GLOBAL_ALL"
+                st.rerun()
+
+    export_biz_id = st.session_state.get("user_scope_filter", "GLOBAL_ALL")
+    if export_biz_id != "GLOBAL_ALL" and export_biz_id in user_labels:
+        biz_name = user_labels[export_biz_id].split(" — ")[-1]
+        biz_phone = user_labels[export_biz_id].split(" — ")[0]
         file_prefix = f"{biz_name.lower().replace(' ', '_')}_"
-        clean_p = selected_phone.lstrip("+") if selected_phone else ""
+        clean_p = biz_phone.lstrip("+")
+
+        st.markdown(
+            f"""
+            <div style="background: rgba(14, 165, 233, 0.1); border: 1px solid rgba(14, 165, 233, 0.35); border-radius: 12px; padding: 12px 18px; margin: 12px 0 16px 0;">
+                <span style="color: #38BDF8; font-weight: 700; font-size: 0.9rem;">👤 Individual User Data Package:</span>
+                <span style="color: #FFFFFF; font-weight: 600; margin-left: 8px;">{user_labels[export_biz_id]}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         tx_query = "select * from transactions where business_id = %s order by created_at desc"
         debts_query = "select * from debts where business_id = %s order by created_at desc"
@@ -1259,8 +1370,8 @@ with tab_costs_knowledge:
             where business_id = %s or to_phone in (%s, %s, %s) or from_phone in (%s, %s, %s)
             order by created_at desc
         """
-        q_params_tx = (selected_business_id,)
-        q_params_msgs = (selected_business_id, selected_phone, clean_p, f"+{clean_p}", selected_phone, clean_p, f"+{clean_p}")
+        q_params_tx = (export_biz_id,)
+        q_params_msgs = (export_biz_id, biz_phone, clean_p, f"+{clean_p}", biz_phone, clean_p, f"+{clean_p}")
 
         c_dl1, c_dl2, c_dl3 = st.columns(3)
         with c_dl1:
@@ -1301,6 +1412,7 @@ with tab_costs_knowledge:
                 st.caption("No chat messages recorded.")
 
         # Certified Statement PDF download
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
         st.markdown("##### 🏦 Certified Bank & Loan Statement (PDF)")
         st.caption(f"Compiled, signed official ledger statement for loan review and financial records for {biz_name}.")
         try:
@@ -1312,7 +1424,7 @@ with tab_costs_knowledge:
             async def _get_pdf():
                 async with async_session_factory() as session:
                     r_svc = ReceiptService()
-                    return await r_svc.generate_statement_pdf(session, UUID(selected_business_id), days=30)
+                    return await r_svc.generate_statement_pdf(session, UUID(export_biz_id), days=30)
 
             pdf_bytes, pdf_filename, pdf_summary = asyncio.run(_get_pdf())
             st.download_button(
@@ -1324,49 +1436,53 @@ with tab_costs_knowledge:
             )
         except Exception as e:
             st.warning(f"PDF Statement generator unavailable: {e}")
-    else:
-        # Global Downloads
-        c_g1, c_g2, c_g3, c_g4 = st.columns(4)
-        with c_g1:
-            all_users_df = query_df("select id, phone_number, display_name, role, is_active, created_at from users order by created_at desc")
-            if not all_users_df.empty:
-                st.download_button(
-                    label="👥 All Users Directory (CSV)",
-                    data=all_users_df.to_csv(index=False),
-                    file_name="waasz_users_directory.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-        with c_g2:
-            all_tx_df = query_df("select * from transactions order by created_at desc limit 2000")
-            if not all_tx_df.empty:
-                st.download_button(
-                    label="📄 All Transactions (CSV)",
-                    data=all_tx_df.to_csv(index=False),
-                    file_name="all_transactions.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-        with c_g3:
-            all_debts_df = query_df("select * from debts order by created_at desc limit 2000")
-            if not all_debts_df.empty:
-                st.download_button(
-                    label="📑 All Customer Debts (CSV)",
-                    data=all_debts_df.to_csv(index=False),
-                    file_name="all_debts.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-        with c_g4:
-            ai_cost_df = query_df("select * from ai_cost_events order by created_at desc limit 1000")
-            if not ai_cost_df.empty:
-                st.download_button(
-                    label="💰 AI Spend Events (CSV)",
-                    data=ai_cost_df.to_csv(index=False),
-                    file_name="ai_cost_events.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+
+    # Platform-Wide Datasets Section (Always available)
+    st.markdown("<div style='height: 20px; border-top: 1px solid rgba(255,255,255,0.08); margin: 24px 0 16px 0;'></div>", unsafe_allow_html=True)
+    st.markdown("##### 🌐 Global Platform Exports (All Users Combined)")
+    st.caption("Download complete historical datasets across all businesses registered on the platform.")
+
+    c_g1, c_g2, c_g3, c_g4 = st.columns(4)
+    with c_g1:
+        all_users_df = query_df("select id, phone_number, display_name, role, is_active, created_at from users order by created_at desc")
+        if not all_users_df.empty:
+            st.download_button(
+                label=f"👥 All Users Directory (CSV)",
+                data=all_users_df.to_csv(index=False),
+                file_name="waasz_users_directory.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    with c_g2:
+        all_tx_df = query_df("select * from transactions order by created_at desc limit 2000")
+        if not all_tx_df.empty:
+            st.download_button(
+                label=f"📄 All Transactions (CSV)",
+                data=all_tx_df.to_csv(index=False),
+                file_name="all_transactions.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    with c_g3:
+        all_debts_df = query_df("select * from debts order by created_at desc limit 2000")
+        if not all_debts_df.empty:
+            st.download_button(
+                label=f"📑 All Customer Debts (CSV)",
+                data=all_debts_df.to_csv(index=False),
+                file_name="all_debts.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+    with c_g4:
+        ai_cost_df = query_df("select * from ai_cost_events order by created_at desc limit 1000")
+        if not ai_cost_df.empty:
+            st.download_button(
+                label=f"💰 AI Spend Events (CSV)",
+                data=ai_cost_df.to_csv(index=False),
+                file_name="ai_cost_events.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
 # ===========================================================================
 # TAB 7: SYSTEM HEALTH & ACCESS
