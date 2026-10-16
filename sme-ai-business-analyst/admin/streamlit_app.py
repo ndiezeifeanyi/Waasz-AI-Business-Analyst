@@ -1,5 +1,7 @@
 import os
 import sys
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Ensure root application directory is in sys.path so 'app' can be imported anywhere
@@ -12,19 +14,213 @@ import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 
-st.set_page_config(page_title="SME AI Founder Dashboard", layout="wide")
+st.set_page_config(
+    page_title="Waasz AI — Executive Telemetry",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 load_dotenv(ROOT_DIR / ".env", override=True)
 
 from admin.auth_manager import (
-    require_admin_auth,
-    format_duration,
     auth_manager,
+    format_duration,
     get_live_base_url,
+    require_admin_auth,
     set_live_base_url,
 )
 
 # Security Gatekeeper: Enforce cryptographic login, weekly expiration, and lockout shield
 admin_session = require_admin_auth()
+
+# ---------------------------------------------------------------------------
+# Executive Motion UI Design System (No AI Slop / Clean Obsidian Aesthetic)
+# ---------------------------------------------------------------------------
+st.markdown(
+    """
+<style>
+/* Import Clean Professional Typography */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600&display=swap');
+
+html, body, [class*="css"], .stMarkdown, .stText, p, span, div, h1, h2, h3, h4 {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+/* Background & Canvas Foundations */
+.stApp {
+    background: radial-gradient(circle at 15% 10%, #0F172A 0%, #080D1A 60%, #050811 100%);
+    color: #F8FAFC;
+}
+
+/* Hide Default Streamlit Clutter */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+[data-testid="stToolbar"] {visibility: hidden;}
+
+/* Motion Card Foundations */
+div[data-testid="stMetric"] {
+    background: rgba(17, 24, 39, 0.75);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 14px;
+    padding: 16px 20px;
+    box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.45);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), 
+                border-color 0.25s cubic-bezier(0.16, 1, 0.3, 1), 
+                box-shadow 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+div[data-testid="stMetric"]:hover {
+    transform: translateY(-3px);
+    border-color: rgba(14, 165, 233, 0.45);
+    box-shadow: 0 12px 25px -6px rgba(14, 165, 233, 0.15), 0 0 1px 1px rgba(14, 165, 233, 0.3);
+}
+
+[data-testid="stMetricLabel"] p {
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+    color: #94A3B8 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+[data-testid="stMetricValue"] div {
+    font-size: 1.85rem !important;
+    font-weight: 700 !important;
+    color: #F8FAFC !important;
+    letter-spacing: -0.03em;
+}
+
+[data-testid="stMetricDelta"] svg {
+    fill: #10B981 !important;
+}
+
+/* Modern Segmented Navigation Tabs */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 6px;
+    background: rgba(15, 23, 42, 0.7);
+    backdrop-filter: blur(14px);
+    padding: 6px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    margin-bottom: 24px;
+}
+
+.stTabs [data-baseweb="tab"] {
+    height: 42px;
+    border-radius: 8px;
+    color: #94A3B8;
+    font-weight: 500;
+    font-size: 0.88rem;
+    padding: 0 18px;
+    border: none;
+    background: transparent;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.stTabs [data-baseweb="tab"]:hover {
+    color: #F8FAFC;
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.stTabs [aria-selected="true"] {
+    background: rgba(14, 165, 233, 0.14) !important;
+    color: #38BDF8 !important;
+    font-weight: 600 !important;
+    border: 1px solid rgba(14, 165, 233, 0.35) !important;
+    box-shadow: 0 2px 10px rgba(14, 165, 233, 0.15);
+}
+
+/* Pulsing Status Badges */
+@keyframes pulseGlowGreen {
+    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+    70% { transform: scale(1.05); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+@keyframes pulseGlowAmber {
+    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.7); }
+    70% { transform: scale(1.05); box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+}
+
+.pulse-dot-green {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background-color: #10B981;
+    border-radius: 50%;
+    animation: pulseGlowGreen 2s infinite;
+    margin-right: 8px;
+}
+
+.pulse-dot-amber {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background-color: #F59E0B;
+    border-radius: 50%;
+    animation: pulseGlowAmber 2s infinite;
+    margin-right: 8px;
+}
+
+.live-badge-healthy {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 14px;
+    border-radius: 9999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+    color: #34D399;
+}
+
+.live-badge-warning {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 14px;
+    border-radius: 9999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    color: #FBBF24;
+}
+
+/* Sidebar Refinement */
+[data-testid="stSidebar"] {
+    background-color: #090D16 !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Custom Buttons with Micro-Shadows */
+.stButton>button {
+    border-radius: 10px;
+    padding: 0.55rem 1.1rem;
+    font-weight: 600;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.stButton>button:hover {
+    transform: translateY(-2px);
+    border-color: rgba(14, 165, 233, 0.4);
+    box-shadow: 0 6px 20px rgba(14, 165, 233, 0.25);
+}
+
+/* Dataframe Clean Styling */
+div[data-testid="stDataFrame"] {
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 
 def database_url() -> str | None:
@@ -55,27 +251,91 @@ def metric_value(df: pd.DataFrame, column: str, default: str = "0") -> str:
     return str(value)
 
 
-st.title("SME AI Founder Dashboard")
+# ---------------------------------------------------------------------------
+# Dynamic Real-Time Health & Alert Sync (No Stale Banners)
+# ---------------------------------------------------------------------------
+recent_pulse_df = query_df(
+    """
+    select
+        count(*) filter (where status = 'failed' and created_at >= now() - interval '15 minutes') as active_fails_15m,
+        count(*) filter (where status in ('delivered', 'read') and created_at >= now() - interval '15 minutes') as active_ok_15m
+    from whatsapp_messages
+    where direction = 'outbound'
+    """
+)
+active_fails_15m = 0
+if not recent_pulse_df.empty:
+    active_fails_15m = int(recent_pulse_df.iloc[0].get("active_fails_15m", 0) or 0)
 
+# ---------------------------------------------------------------------------
+# Executive Top Header
+# ---------------------------------------------------------------------------
+top_col1, top_col2 = st.columns([3, 1])
+with top_col1:
+    st.markdown(
+        """
+        <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 4px;">
+            <span style="font-size: 1.85rem; font-weight: 800; letter-spacing: -0.04em; color: #FFFFFF;">
+                WAASZ <span style="color: #38BDF8;">AI</span>
+            </span>
+            <span style="background: rgba(56, 189, 248, 0.12); color: #38BDF8; font-size: 0.72rem; font-weight: 700; padding: 4px 10px; border-radius: 9999px; letter-spacing: 0.05em; border: 1px solid rgba(56, 189, 248, 0.3);">
+                FOUNDER TELEMETRY
+            </span>
+        </div>
+        <p style="color: #94A3B8; font-size: 0.88rem; margin-top: -6px; margin-bottom: 16px;">
+            Real-time business intelligence, conversational ledger telemetry, and Meta Cloud API delivery cockpit.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with top_col2:
+    if active_fails_15m > 0:
+        st.markdown(
+            f"""
+            <div style="text-align: right; padding-top: 10px;">
+                <span class="live-badge-warning">
+                    <span class="pulse-dot-amber"></span> Notice: {active_fails_15m} Delivery Issue(s)
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div style="text-align: right; padding-top: 10px;">
+                <span class="live-badge-healthy">
+                    <span class="pulse-dot-green"></span> All Systems Operational
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+# ---------------------------------------------------------------------------
+# Core Executive KPI Metrics (6 Cards)
+# ---------------------------------------------------------------------------
 metrics = query_df("select * from v_founder_dashboard_metrics")
-col1, col2, col3, col4, col5, col6 = st.columns(6)
-col1.metric("Active Businesses", metric_value(metrics, "active_businesses"), help="Total live SME businesses registered and active")
-col2.metric("Inbound (24h)", metric_value(metrics, "inbound_messages_24h"), help="WhatsApp messages received from customers/testers in the last 24h")
-col3.metric("Outbound (24h)", metric_value(metrics, "outbound_messages_24h"), help="Bot replies, reports, and reminders sent in the last 24h")
-col4.metric("Pending Confirmations", metric_value(metrics, "pending_confirmations"), help="Transaction drafts currently awaiting user confirmation reply")
-col5.metric("Confirmed Tx (24h)", metric_value(metrics, "confirmed_records_24h"), help="Sales and expenses officially written to ledger in the last 24h")
+kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
+
+kpi1.metric("Active Businesses", metric_value(metrics, "active_businesses"), help="Total live SME businesses registered and active")
+kpi2.metric("Inbound (24h)", metric_value(metrics, "inbound_messages_24h"), help="WhatsApp messages received in the last 24 hours")
+kpi3.metric("Outbound (24h)", metric_value(metrics, "outbound_messages_24h"), help="Dispatches sent in the last 24 hours")
+kpi4.metric("Pending Drafts", metric_value(metrics, "pending_confirmations"), help="Draft records currently awaiting user confirmation")
+kpi5.metric("Confirmed Sales (24h)", metric_value(metrics, "confirmed_records_24h"), help="Sales and expenses officially written to ledger in last 24h")
+
 try:
     spend_disp = f"${float(metric_value(metrics, 'ai_spend_today_usd', '0')):.4f}"
 except (ValueError, TypeError):
     spend_disp = "$0.0000"
-col6.metric("AI Spend Today", spend_disp, help="Accurate AI model API cost calculated from today's token usage")
+kpi6.metric("AI Spend Today", spend_disp, help="Actual AI model API cost calculated from today's token usage")
 
-failed_recent_df = query_df("select count(*) as cnt from whatsapp_messages where status = 'failed' and created_at >= now() - interval '24 hours'")
-if not failed_recent_df.empty:
-    fail_cnt_24h = int(failed_recent_df.iloc[0].get("cnt", 0) or 0)
-    if fail_cnt_24h > 0:
-        st.error(f"🚨 **Action Required**: {fail_cnt_24h} WhatsApp outbound message(s) failed delivery in the last 24 hours! Open the **💬 Messages** tab to view the exact Meta failure reasons.")
+st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
+# ---------------------------------------------------------------------------
+# Business Filtering & Sidebar Controls
+# ---------------------------------------------------------------------------
 businesses = query_df(
     """
     select id::text, name, phone_number, business_type, subscription_plan, created_at
@@ -87,84 +347,69 @@ businesses = query_df(
 )
 
 selected_business_id = None
+labels = {}
+if not businesses.empty:
+    labels = {
+        row["id"]: f"{row['name']} ({row['phone_number']})"
+        for _, row in businesses.iterrows()
+    }
+
 with st.sidebar:
     logo_file = Path(__file__).resolve().parent / "waasz_logo.jpg"
     if logo_file.exists():
-        st.image(str(logo_file), width=90)
-    st.header("⚡ System Health Pulse")
-    
+        st.image(str(logo_file), width=84)
+    st.markdown("### ⚡ Live Mission Control")
+
     # 1. DB Ping
-    import time
     t0 = time.perf_counter()
     db_check = query_df("SELECT 1 as alive")
     db_latency = (time.perf_counter() - t0) * 1000
     if not db_check.empty:
-        st.success(f"🟢 Database Connected ({db_latency:.1f}ms)")
+        st.success(f"🟢 Database: {db_latency:.1f}ms")
     else:
         st.error("🔴 Database Offline")
 
     # 2. WhatsApp Meta API Status
     from app.core.config import settings
     if settings.whatsapp_access_token and not settings.whatsapp_access_token.startswith("replace-"):
-        st.success("🟢 Meta WhatsApp API: Configured")
+        st.success("🟢 Meta Cloud API: Online")
     else:
-        st.warning("🟡 Meta WhatsApp API: Unconfigured")
+        st.warning("🟡 Meta Cloud API: Unset")
 
-    # 3. Live AI Engine
+    # 3. Live AI Model
     try:
         from app.core.model_resolver import model_resolver
         active_model = model_resolver.get_active_model("gemini", "chat") or model_resolver.get_active_model("groq", "chat") or getattr(settings, "gemini_model", "gemini-3.8-flash")
     except Exception:
         active_model = getattr(settings, "gemini_model", "gemini-3.8-flash")
-    st.info(f"🤖 Live AI Model: `{active_model}`")
+    st.info(f"🤖 Active AI: `{active_model}`")
 
-    # 4. Live Webhook Endpoint (Dynamically synced with system_settings)
-    from admin.auth_manager import get_live_base_url, set_live_base_url
-    live_base = get_live_base_url()
-    live_webhook = f"{live_base}/webhooks/whatsapp"
-    st.markdown("**🌐 Active Webhook URL:**")
-    st.code(live_webhook, language="text")
-
-    with st.expander("⚡ Sync / Change Webhook URL"):
-        new_endpoint = st.text_input("Active Base Endpoint", value=live_base, key="input_live_base_url")
-        if st.button("Save & Sync Everywhere", key="btn_save_endpoint", use_container_width=True):
-            if new_endpoint.strip():
-                set_live_base_url(new_endpoint)
-                st.success(f"Synced! Active endpoint set to {new_endpoint}")
-                st.cache_data.clear()
-                st.rerun()
-
-    st.write("---")
-    st.header("Filters & Controls")
-    if not businesses.empty:
-        labels = {
-            row["id"]: f"{row['name']} ({row['phone_number']})"
-            for _, row in businesses.iterrows()
-        }
+    st.markdown("---")
+    st.markdown("#### 🏢 Merchant Scope")
+    if labels:
         selected_business_id = st.selectbox(
-            "Business",
+            "Select Business",
             options=["All", *labels.keys()],
-            format_func=lambda value: labels.get(value, value),
+            format_func=lambda val: labels.get(val, val),
+            label_visibility="collapsed",
         )
         if selected_business_id == "All":
             selected_business_id = None
 
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.button("🔄 Sync Now", use_container_width=True):
+    st.markdown("---")
+    st.markdown("#### ⚡ Telemetry Pulse")
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        if st.button("🔄 Sync", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-    with col_btn2:
-        auto_sync = st.checkbox("Live 10s Poll", value=False, help="Automatically poll and update live messages every 10 seconds")
+    with col_s2:
+        auto_sync = st.checkbox("Live 15s", value=False, help="Automatically refresh dashboard every 15s")
 
     if auto_sync:
-        time.sleep(10)
+        time.sleep(15)
         st.cache_data.clear()
         st.rerun()
-
-tab_overview, tab_confirmations, tab_messages, tab_simulator, tab_broadcast, tab_export, tab_costs, tab_tasks, tab_knowledge, tab_invites, tab_recovery, tab_security = st.tabs(
-    ["📊 Overview", "⏳ Confirmations", "💬 Messages", "🤖 Live Bot Console", "📢 Broadcast", "📥 Data Export", "💰 Costs", "⏰ Tasks & Reminders", "🧠 Knowledge & Embeddings", "🛡️ Users & Access", "🔑 Account Recovery", "⚙️ Security & Sync"]
-)
 
 business_filter = ""
 params: tuple = ()
@@ -172,8 +417,33 @@ if selected_business_id:
     business_filter = "where business_id = %s"
     params = (selected_business_id,)
 
+# ---------------------------------------------------------------------------
+# Structured 7-Tab High-Impact Navigation
+# ---------------------------------------------------------------------------
+(
+    tab_overview,
+    tab_messages,
+    tab_confirmations,
+    tab_console_broadcast,
+    tab_tasks,
+    tab_costs_knowledge,
+    tab_system_access,
+) = st.tabs(
+    [
+        "📊 Executive Overview",
+        "💬 Message & Delivery Hub",
+        "⏳ Confirmations & Drafts",
+        "🤖 Bot Console & Broadcast",
+        "⏰ Tasks & Reminders",
+        "💰 Costs & Knowledge",
+        "⚙️ System Health & Access",
+    ]
+)
+
+# ===========================================================================
+# TAB 1: EXECUTIVE OVERVIEW
+# ===========================================================================
 with tab_overview:
-    # 1. Live Onboarded Businesses & 14-Day Free Trial Tracker
     st.subheader("👥 Live Onboarded Businesses & 14-Day Free Trial Tracker")
     st.caption("Live sync of all businesses interacting with Waasz on WhatsApp: onboarding progress, trial days remaining, transactions, and reviews.")
 
@@ -199,102 +469,73 @@ with tab_overview:
         where b.deleted_at is null
         group by b.id, b.name, b.phone_number, u.phone_number, b.created_at, u.last_inbound_at, b.settings
         order by b.created_at desc
+        limit 200
         """
     )
 
     if not trial_tracker_raw.empty:
-        from datetime import datetime, timezone
-
-        now_utc = datetime.now(timezone.utc)
-        
-        # Calculate summary KPI cards
-        total_biz = len(trial_tracker_raw)
-        active_trials_count = 0
-        total_all_sales = float(trial_tracker_raw["total_sales_ngn"].sum())
-        total_all_tx = int(trial_tracker_raw["total_tx_count"].sum())
-        
-        ratings = []
-        status_list = []
-        stage_list = []
-        sales_disp_list = []
-        joined_list = []
-        last_seen_list = []
-        rating_disp_list = []
-        feedback_list = []
+        now_dt = datetime.now(UTC)
+        status_list, stage_list, sales_disp_list = [], [], []
+        rating_disp_list, feedback_list, last_seen_list, joined_list = [], [], [], []
 
         for _, row in trial_tracker_raw.iterrows():
-            # Trial calculation
-            exp_str = row.get("trial_expires_at")
-            if exp_str and pd.notna(exp_str):
-                try:
-                    exp_dt = datetime.fromisoformat(str(exp_str))
-                    if exp_dt.tzinfo is None:
-                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
-                    days_left = (exp_dt - now_utc).days
-                    if now_utc > exp_dt:
-                        status_list.append("⚠️ Expired (Day 14+)")
-                    else:
-                        active_trials_count += 1
-                        days_elapsed = max(1, 14 - max(0, days_left))
-                        status_list.append(f"🟢 Day {days_elapsed} of 14 ({days_left}d left)")
-                except Exception:
-                    status_list.append("🟢 Active Trial")
-                    active_trials_count += 1
-            else:
-                status_list.append("🟢 14-Day Trial")
-                active_trials_count += 1
-
-            # Stage formatting
-            stg = str(row.get("onboarding_stage", "completed"))
-            if stg == "awaiting_business_name":
-                stage_list.append("📝 Awaiting Shop Name")
-            elif stg == "awaiting_receipt_details":
-                stage_list.append("🧾 Awaiting Receipt Setup")
-            else:
-                stage_list.append("✅ Active / Ready")
-
-            # Sales formatting
-            sales_disp_list.append(f"₦{float(row.get('total_sales_ngn', 0)):,.2f}")
-
             # Joined date
-            c_at = row.get("created_at")
+            c_at = row["created_at"]
             if pd.notna(c_at):
-                joined_list.append(str(c_at)[:16])
+                joined_list.append(pd.to_datetime(c_at).strftime("%b %d, %Y"))
             else:
                 joined_list.append("-")
 
+            # Trial Days remaining
+            t_exp_raw = row["trial_expires_at"]
+            raw_status = (row["trial_status"] or "active").lower()
+            if t_exp_raw:
+                try:
+                    exp_dt = datetime.fromisoformat(t_exp_raw.replace("Z", "+00:00"))
+                    diff_days = (exp_dt - now_dt).days
+                    if raw_status == "converted":
+                        status_list.append("💎 Subscribed")
+                    elif diff_days < 0:
+                        status_list.append(f"🔴 Expired ({abs(diff_days)}d ago)")
+                    elif diff_days == 0:
+                        status_list.append("🟡 Expires Today")
+                    else:
+                        status_list.append(f"🟢 {diff_days}d remaining")
+                except Exception:
+                    status_list.append("🟢 Active Trial")
+            else:
+                status_list.append("🟢 Active Trial")
+
+            # Stage
+            stg = (row["onboarding_stage"] or "completed").lower()
+            if stg in ("completed", "ready"):
+                stage_list.append("✅ Fully Onboarded")
+            elif stg == "awaiting_business_name":
+                stage_list.append("⏳ Name Pending")
+            else:
+                stage_list.append(f"🔄 {stg.replace('_', ' ').title()}")
+
+            # Sales
+            sales_val = float(row["total_sales_ngn"] or 0)
+            sales_disp_list.append(f"₦{sales_val:,.2f}" if sales_val > 0 else "₦0.00")
+
+            # Rating
+            r_val = row["review_rating"]
+            rating_disp_list.append(f"{r_val} ⭐" if pd.notna(r_val) and str(r_val).isdigit() else "-")
+
+            # Feedback
+            fb = row["review_feedback"]
+            feedback_list.append(str(fb) if pd.notna(fb) and str(fb).strip() else "-")
+
             # Last seen
-            l_in = row.get("last_inbound_at")
+            l_in = row["last_inbound_at"]
             if pd.notna(l_in):
-                last_seen_list.append(str(l_in)[:16])
+                in_dt = pd.to_datetime(l_in).tz_localize(None) if pd.to_datetime(l_in).tzinfo else pd.to_datetime(l_in)
+                hrs = int((datetime.utcnow() - in_dt).total_seconds() // 3600)
+                last_seen_list.append(f"{hrs}h ago" if hrs < 48 else f"{hrs // 24}d ago")
             else:
-                last_seen_list.append("-")
+                last_seen_list.append("Never")
 
-            # Review & Feedback
-            r_val = row.get("review_rating")
-            if pd.notna(r_val) and str(r_val).isdigit():
-                r_num = int(r_val)
-                ratings.append(r_num)
-                rating_disp_list.append(f"{'⭐' * r_num} ({r_num}/5)")
-            else:
-                rating_disp_list.append("Pending")
-
-            f_val = row.get("review_feedback")
-            if pd.notna(f_val) and str(f_val).strip():
-                feedback_list.append(str(f_val).strip())
-            else:
-                feedback_list.append("-")
-
-        # Top Trial KPIs
-        kpi_c1, kpi_c2, kpi_c3, kpi_c4, kpi_c5 = st.columns(5)
-        kpi_c1.metric("Total Onboarded", total_biz, help="All businesses registered via WhatsApp")
-        kpi_c2.metric("Active Free Trials", active_trials_count, help="Businesses currently within their 14-day trial")
-        kpi_c3.metric("Total Sales Tracked", f"₦{total_all_sales:,.0f}", help="Total sales revenue logged during trials")
-        kpi_c4.metric("Transactions Logged", total_all_tx, help="Total transaction records created")
-        avg_rating_str = f"⭐ {sum(ratings)/len(ratings):.1f}/5" if ratings else "No reviews yet"
-        kpi_c5.metric("Avg User Rating", avg_rating_str, help="Average Week 1 review rating")
-
-        # Create structured display DataFrame
         disp_df = pd.DataFrame({
             "Business Name": trial_tracker_raw["business_name"],
             "WhatsApp Phone": trial_tracker_raw["phone_number"],
@@ -308,8 +549,7 @@ with tab_overview:
             "Last Active": last_seen_list,
         })
 
-        # Search filter
-        search_kw = st.text_input("🔍 Search Onboarded Businesses", placeholder="Filter by business name or phone...", key="search_tracker_input")
+        search_kw = st.text_input("🔍 Filter Onboarded Businesses", placeholder="Type business name or phone...", key="search_tracker_input")
         if search_kw.strip():
             kw = search_kw.strip().lower()
             disp_df = disp_df[
@@ -319,7 +559,6 @@ with tab_overview:
 
         st.dataframe(disp_df, use_container_width=True, hide_index=True)
 
-        # Highlight reviews if present
         reviews_exist = [f for f in feedback_list if f != "-"]
         if reviews_exist:
             with st.expander(f"💬 Live Customer Feedback & Reviews ({len(reviews_exist)} submitted)"):
@@ -330,7 +569,7 @@ with tab_overview:
     else:
         st.info("No businesses onboarded yet. New WhatsApp signups will appear here live.")
 
-    st.write("---")
+    st.markdown("---")
     st.subheader("📊 Business Performance & Daily Rollups")
     rollups = query_df(
         f"""
@@ -343,130 +582,20 @@ with tab_overview:
         params,
     )
     if rollups.empty:
-        st.info("No confirmed records yet.")
+        st.info("No confirmed transaction records yet.")
     else:
         chart_df = rollups.sort_values("business_date").set_index("business_date")
         st.line_chart(chart_df[["total_sales", "total_expenses", "estimated_profit"]])
         st.dataframe(rollups, use_container_width=True, hide_index=True)
 
-with tab_confirmations:
-    st.subheader("⏳ Confirmations & Draft Operations")
-    pending_df = query_df(
-        f"""
-        select
-            c.id::text as confirmation_id,
-            c.created_at,
-            b.name as business,
-            b.phone_number,
-            c.confirmation_text,
-            c.expires_at,
-            case when c.expires_at < now() then '⚠️ Expired' else '⏳ Awaiting Reply' end as expiry_status
-        from confirmations c
-        join businesses b on b.id = c.business_id
-        where c.status = 'pending'
-        {"and c.business_id = %s" if selected_business_id else ""}
-        order by c.created_at desc
-        """,
-        params,
-    )
-
-    col_p_title, col_p_clean = st.columns([3, 1])
-    with col_p_title:
-        st.write(f"### ⏳ Active Pending Confirmations ({len(pending_df)})")
-    with col_p_clean:
-        if st.button("🧹 Clear Expired Drafts", help="Marks all overdue pending confirmations as expired so 'Pending' drops to 0"):
-            import psycopg
-
-            def _clean_expired():
-                url = database_url()
-                if url:
-                    try:
-                        with psycopg.connect(url) as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("UPDATE confirmations SET status = 'expired' WHERE status = 'pending' AND expires_at < NOW()")
-                            conn.commit()
-                    except Exception as e:
-                        st.error(f"Failed to clear expired drafts: {e}")
-
-            _clean_expired()
-            st.success("Cleaned up expired drafts!")
-            st.cache_data.clear()
-            st.rerun()
-
-    if not pending_df.empty:
-        st.dataframe(pending_df, use_container_width=True, hide_index=True)
-
-        col_act_sel, col_act_btn1, col_act_btn2 = st.columns([2, 1, 1])
-        with col_act_sel:
-            target_conf_id = st.selectbox(
-                "Select Pending Draft for Admin Override",
-                options=pending_df["confirmation_id"].tolist(),
-                format_func=lambda cid: (
-                    f"{pending_df.loc[pending_df['confirmation_id'] == cid, 'business'].values[0] if cid in pending_df['confirmation_id'].values else 'Draft'}: "
-                    f"{str(pending_df.loc[pending_df['confirmation_id'] == cid, 'confirmation_text'].values[0])[:50] if cid in pending_df['confirmation_id'].values else ''}..."
-                ),
-                key="select_pending_draft_override",
-            )
-        with col_act_btn1:
-            if target_conf_id and st.button("✅ Force Confirm Draft", key="btn_force_confirm"):
-                import psycopg
-                url = database_url()
-                if url:
-                    try:
-                        with psycopg.connect(url) as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("UPDATE confirmations SET status = 'confirmed', confirmed_at = NOW() WHERE id = %s", (target_conf_id,))
-                            conn.commit()
-                        st.success("Draft force-confirmed!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to force confirm draft: {e}")
-        with col_act_btn2:
-            if target_conf_id and st.button("❌ Reject / Cancel Draft", key="btn_reject_draft"):
-                import psycopg
-                url = database_url()
-                if url:
-                    try:
-                        with psycopg.connect(url) as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("UPDATE confirmations SET status = 'rejected' WHERE id = %s", (target_conf_id,))
-                            conn.commit()
-                        st.success("Draft rejected.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to reject draft: {e}")
-    else:
-        st.success("🎉 No pending confirmations waiting for reply! All records are confirmed or resolved.")
-
-    st.write("---")
-    st.write("### 📜 All Confirmation History")
-    confirmations = query_df(
-        f"""
-        select
-            c.created_at,
-            b.name as business,
-            c.status,
-            c.confirmation_text,
-            c.correction_text,
-            c.expires_at,
-            c.confirmed_at
-        from confirmations c
-        join businesses b on b.id = c.business_id
-        {"where c.business_id = %s" if selected_business_id else ""}
-        order by c.created_at desc
-        limit 100
-        """,
-        params,
-    )
-    st.dataframe(confirmations, use_container_width=True, hide_index=True)
-
+# ===========================================================================
+# TAB 2: MESSAGE & DELIVERY HUB
+# ===========================================================================
 with tab_messages:
     st.subheader("💬 WhatsApp Messages & Live Delivery Pulse")
     st.caption("Real-time monitoring of all inbound and outbound WhatsApp messages, Meta delivery receipts, read receipts, and error diagnostics.")
 
-    # 1. Delivery health pulse (last 24h & 7d)
+    # 1. Delivery pulse cards (last 24 hours)
     stats_df = query_df(
         f"""
         select
@@ -494,24 +623,21 @@ with tab_messages:
 
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Inbound (24h)", m_in, help="Messages received from users in the last 24h")
-        c2.metric("Outbound (24h)", m_out, help="Total messages dispatched by the system in the last 24h")
+        c2.metric("Outbound (24h)", m_out, help="Messages dispatched by the system in the last 24h")
         c3.metric("Delivered / Read", f"{m_deliv} ({m_read} read)", help="Messages confirmed delivered or read on WhatsApp")
-        c4.metric("Pending Meta Ack", m_pend, help="Messages accepted by Meta Cloud API awaiting delivery callback")
-        c5.metric("Failed Deliveries", m_fail, delta=f"-{m_fail}" if m_fail > 0 else "0", delta_color="inverse", help="Messages rejected or failed by Meta Cloud API")
+        c4.metric("Pending Meta Ack", m_pend, help="Messages accepted by Meta awaiting status receipt")
+        c5.metric("Failed Deliveries", m_fail, delta=f"-{m_fail}" if m_fail > 0 else "0", delta_color="inverse", help="Messages rejected by Meta Cloud API")
 
-        if m_fail > 0:
-            st.error(f"🚨 **{m_fail} Outbound Message(s) Failed in the Last 24 Hours!** Check below for exact Meta failure codes (e.g. 131049 marketing cap, 131047 24h window closed, or 132001 missing template).")
-
-    # 2. Filter & Controls
+    # 2. Filter & Search Controls
     col_f1, col_f2 = st.columns([2, 1])
     with col_f1:
         status_filter = st.selectbox(
             "Filter Messages by Delivery Status",
-            ["All", "🔴 Failed Only", "🟢 Read / Delivered", "🟡 Sent (Pending)", "📥 Inbound Only", "📤 Outbound Only"],
+            ["All", "🟢 Read / Delivered", "🟡 Sent (Pending)", "🔴 Failed Only", "📥 Inbound Only", "📤 Outbound Only"],
             key="msg_status_filter",
         )
     with col_f2:
-        msg_search = st.text_input("🔍 Search Text or Phone", placeholder="Phone number, keyword...", key="msg_search_input")
+        msg_search = st.text_input("🔍 Search Messages or Phone", placeholder="Type phone, keyword, or error...", key="msg_search_input")
 
     where_clauses = []
     query_params = list(params)
@@ -556,7 +682,6 @@ with tab_messages:
     )
 
     if not messages_df.empty:
-        # Visual status format
         def _fmt_status(s: str) -> str:
             st_clean = str(s or "").lower()
             if st_clean == "read":
@@ -568,15 +693,15 @@ with tab_messages:
             elif st_clean == "failed":
                 return "🔴 Failed"
             elif st_clean == "processed":
-                return "✅ Inbound"
+                return "📥 Inbound"
             return st_clean
 
         messages_df["Delivery Status"] = messages_df["status"].apply(_fmt_status)
 
-        # Highlight errors if failed messages exist in current view
+        # Smart, uncluttered diagnostics drawer
         failed_subset = messages_df[messages_df["status"] == "failed"]
         if not failed_subset.empty:
-            with st.expander(f"⚠️ View Error Diagnostics ({len(failed_subset)} Failed Messages Shown)", expanded=True):
+            with st.expander(f"🔍 Meta Delivery Error Breakdown ({len(failed_subset)} failures in current view)", expanded=(status_filter == "🔴 Failed Only")):
                 err_counts = failed_subset["error_message"].value_counts().reset_index()
                 err_counts.columns = ["Meta Error Message / Reason", "Occurrences"]
                 st.dataframe(err_counts, use_container_width=True, hide_index=True)
@@ -586,24 +711,133 @@ with tab_messages:
     else:
         st.info("No messages match the selected filters.")
 
-with tab_simulator:
-    st.subheader("🤖 Interactive WhatsApp Bot Simulator")
-    st.caption("Test user transactions, queries, reminders, and confirmations directly through the AI engine without needing WhatsApp.")
+# ===========================================================================
+# TAB 3: CONFIRMATIONS & DRAFTS
+# ===========================================================================
+with tab_confirmations:
+    st.subheader("⏳ Confirmations & Draft Operations")
+    pending_df = query_df(
+        f"""
+        select
+            c.id::text as confirmation_id,
+            c.created_at,
+            b.name as business,
+            b.phone_number,
+            c.confirmation_text,
+            c.expires_at,
+            case when c.expires_at < now() then '⚠️ Expired' else '⏳ Awaiting Reply' end as expiry_status
+        from confirmations c
+        join businesses b on b.id = c.business_id
+        where c.status = 'pending'
+        {"and c.business_id = %s" if selected_business_id else ""}
+        order by c.created_at desc
+        """,
+        params,
+    )
 
-    users_sim_df = query_df("select u.phone_number, coalesce(u.display_name, b.name, 'Tester') as name from users u left join businesses b on b.id = u.business_id order by u.created_at desc")
-    phone_options = users_sim_df["phone_number"].tolist() if not users_sim_df.empty else ["2349155716041"]
+    col_p_title, col_p_clean = st.columns([3, 1])
+    with col_p_title:
+        st.markdown(f"**Active Pending Drafts:** `{len(pending_df)}`")
+    with col_p_clean:
+        if st.button("🧹 Clear Expired Drafts", help="Marks all overdue pending confirmations as expired"):
+            def _clean_expired():
+                url = database_url()
+                if url:
+                    try:
+                        with psycopg.connect(url) as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE confirmations SET status = 'expired' WHERE status = 'pending' AND expires_at < NOW()")
+                            conn.commit()
+                    except Exception as e:
+                        st.error(f"Failed to clear expired drafts: {e}")
 
-    sim_col1, sim_col2 = st.columns([1, 2])
-    with sim_col1:
-        st.write("#### 👤 Sender Identity")
-        sim_phone = st.selectbox("Select Active User", options=phone_options, key="sim_select_user")
-        custom_sim_phone = st.text_input("Or Custom Simulation Phone", placeholder="+2348012345678", key="sim_custom_phone")
+            _clean_expired()
+            st.success("Cleaned up expired drafts!")
+            st.cache_data.clear()
+            st.rerun()
+
+    if not pending_df.empty:
+        st.dataframe(pending_df, use_container_width=True, hide_index=True)
+
+        col_act_sel, col_act_btn1, col_act_btn2 = st.columns([2, 1, 1])
+        with col_act_sel:
+            target_conf_id = st.selectbox(
+                "Select Draft for Override",
+                options=pending_df["confirmation_id"].tolist(),
+                format_func=lambda cid: (
+                    f"{pending_df.loc[pending_df['confirmation_id'] == cid, 'business'].values[0] if cid in pending_df['confirmation_id'].values else 'Draft'}: "
+                    f"{str(pending_df.loc[pending_df['confirmation_id'] == cid, 'confirmation_text'].values[0])[:50] if cid in pending_df['confirmation_id'].values else ''}..."
+                ),
+                key="select_pending_draft_override",
+            )
+        with col_act_btn1:
+            if target_conf_id and st.button("✅ Force Confirm Draft", key="btn_force_confirm", use_container_width=True):
+                url = database_url()
+                if url:
+                    try:
+                        with psycopg.connect(url) as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE confirmations SET status = 'confirmed', confirmed_at = NOW() WHERE id = %s", (target_conf_id,))
+                            conn.commit()
+                        st.success("Draft force-confirmed!")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to force confirm draft: {e}")
+        with col_act_btn2:
+            if target_conf_id and st.button("❌ Reject Draft", key="btn_reject_draft", use_container_width=True):
+                url = database_url()
+                if url:
+                    try:
+                        with psycopg.connect(url) as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE confirmations SET status = 'rejected' WHERE id = %s", (target_conf_id,))
+                            conn.commit()
+                        st.success("Draft rejected.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to reject draft: {e}")
+    else:
+        st.success("🎉 No pending confirmations waiting for reply. All records are resolved.")
+
+    st.markdown("---")
+    st.markdown("#### 📜 Recent Confirmation History")
+    confirmations = query_df(
+        f"""
+        select
+            c.created_at,
+            b.name as business,
+            c.status,
+            c.confirmation_text,
+            c.confirmed_at
+        from confirmations c
+        join businesses b on b.id = c.business_id
+        {business_filter}
+        order by c.created_at desc
+        limit 50
+        """,
+        params,
+    )
+    st.dataframe(confirmations, use_container_width=True, hide_index=True)
+
+# ===========================================================================
+# TAB 4: BOT CONSOLE & BROADCAST
+# ===========================================================================
+with tab_console_broadcast:
+    col_sim_sec, col_bc_sec = st.columns(2)
+
+    with col_sim_sec:
+        st.subheader("🤖 Bot Simulator")
+        st.caption("Simulate inbound WhatsApp messages directly through the AI agent.")
+
+        users_sim_df = query_df("select u.phone_number, coalesce(u.display_name, b.name, 'Tester') as name from users u left join businesses b on b.id = u.business_id order by u.created_at desc")
+        phone_options = users_sim_df["phone_number"].tolist() if not users_sim_df.empty else ["2349155716041"]
+
+        sim_phone = st.selectbox("Sender Identity", options=phone_options, key="sim_select_user")
+        custom_sim_phone = st.text_input("Or Custom Phone", placeholder="+2348012345678", key="sim_custom_phone")
         active_sim_phone = custom_sim_phone.strip() if custom_sim_phone.strip() else sim_phone
 
-        st.info(f"Simulating inbound message from: `{active_sim_phone}`")
-
-    with sim_col2:
-        st.write("#### 💬 Message Prompt")
         quick_prompts = [
             "Sold 3 cartons of noodles for ₦21,000",
             "Bought diesel for generator ₦15,000",
@@ -612,33 +846,28 @@ with tab_simulator:
             "What is my current inventory of rice?",
             "1",
         ]
-        chosen_prompt = st.selectbox("Quick Templates", ["Custom Message..."] + quick_prompts, key="sim_template_select")
+        chosen_prompt = st.selectbox("Quick Prompts", ["Custom Message..."] + quick_prompts, key="sim_template_select")
         default_text = "" if chosen_prompt == "Custom Message..." else chosen_prompt
-        sim_input = st.text_area("Your WhatsApp Message", value=default_text, height=100, placeholder="Type any business update or question...", key="sim_input_area")
-        send_sim = st.button("🚀 Send to AI Assistant", type="primary", key="sim_send_btn")
+        sim_input = st.text_area("WhatsApp Message", value=default_text, height=90, placeholder="Type message...", key="sim_input_area")
 
-        if send_sim and sim_input.strip():
+        if st.button("🚀 Execute Simulator", type="primary", key="sim_send_btn", use_container_width=True) and sim_input.strip():
             import asyncio
             from app.core.database import async_session_factory
-            from app.schemas.whatsapp import ParsedWhatsAppMessage
+            from app.schemas.whatsapp import ParsedWhatsAppMessage, WhatsAppSendResult
             from app.services.webhook_processor import WhatsAppWebhookProcessor
-            from datetime import UTC, datetime
 
             class CapturedWhatsApp:
                 def __init__(self):
                     self.sent_messages = []
                 async def send_text(self, to_phone: str, body: str, **kwargs):
                     self.sent_messages.append({"to": to_phone, "type": "text", "body": body})
-                    from app.schemas.whatsapp import WhatsAppSendResult
                     return WhatsAppSendResult(message_id="sim_msg")
                 async def send_interactive_buttons(self, to_phone: str, body: str, buttons, **kwargs):
                     btn_text = "\n".join([f"🔘 [{b.get('title')}] (ID: {b.get('id')})" for b in buttons])
                     self.sent_messages.append({"to": to_phone, "type": "buttons", "body": f"{body}\n\n{btn_text}"})
-                    from app.schemas.whatsapp import WhatsAppSendResult
                     return WhatsAppSendResult(message_id="sim_msg")
                 async def send_document_bytes(self, *args, **kwargs):
                     self.sent_messages.append({"type": "document", "body": "📄 [PDF Document / Receipt Generated]"})
-                    from app.schemas.whatsapp import WhatsAppSendResult
                     return WhatsAppSendResult(message_id="sim_msg")
 
             mock_wa = CapturedWhatsApp()
@@ -661,50 +890,36 @@ with tab_simulator:
                 try:
                     replies = asyncio.run(_run_sim())
                     st.success("✅ Processed successfully!")
-                    st.write("### 🤖 Bot Response:")
                     for r in replies:
                         st.chat_message("assistant").markdown(r["body"])
                     st.cache_data.clear()
                 except Exception as e:
                     st.error(f"Simulation failed: {e}")
 
-with tab_broadcast:
-    st.subheader("📢 WhatsApp Broadcast & Direct Announcer")
-    st.caption("Send official updates, feature announcements, or alert messages directly to testers' WhatsApp.")
+    with col_bc_sec:
+        st.subheader("📢 Direct WhatsApp Announcer")
+        st.caption("Broadcast announcements directly to testers and onboarded merchants.")
 
-    testers_for_bc = query_df("select phone_number, coalesce(label, phone_number) as label from approved_testers order by added_at desc")
-    tester_choices = testers_for_bc["phone_number"].tolist() if not testers_for_bc.empty else []
+        testers_for_bc = query_df("select phone_number, coalesce(label, phone_number) as label from approved_testers order by added_at desc")
+        tester_choices = testers_for_bc["phone_number"].tolist() if not testers_for_bc.empty else []
 
-    bc_col1, bc_col2 = st.columns([1, 2])
-    with bc_col1:
-        st.write("#### 🎯 Recipients")
-        bc_target = st.radio(
-            "Send To",
-            options=["All Approved Testers", "Specific Phone Number"],
-            key="bc_target_radio",
-        )
+        bc_target = st.radio("Target Audience", options=["All Approved Testers", "Single Phone Number"], key="bc_target_radio", horizontal=True)
         single_phone = ""
-        if bc_target == "Specific Phone Number":
+        if bc_target == "Single Phone Number":
             if tester_choices:
-                single_phone = st.selectbox("Select Approved Tester", options=tester_choices, key="bc_select_tester")
+                single_phone = st.selectbox("Select Tester", options=tester_choices, key="bc_select_tester")
             custom_bc_phone = st.text_input("Or Custom Number", placeholder="+2348012345678", key="bc_custom_phone_input")
             if custom_bc_phone.strip():
                 single_phone = custom_bc_phone.strip()
 
-        target_count = len(tester_choices) if bc_target == "All Approved Testers" else (1 if single_phone else 0)
-        st.info(f"Target count: {target_count}")
-
-    with bc_col2:
-        st.write("#### 📝 Announcement Content")
         bc_message = st.text_area(
-            "Broadcast Message",
-            height=120,
-            placeholder="e.g. 📢 Waasz Update: Our new automated receipt generation feature is now live! Send any transaction to test it.",
+            "Announcement Text",
+            height=90,
+            placeholder="e.g. 📢 Waasz Update: Check your daily report on WhatsApp!",
             key="bc_message_content",
         )
-        send_bc = st.button("📤 Send WhatsApp Broadcast", type="primary", key="bc_send_button")
 
-        if send_bc:
+        if st.button("📤 Send WhatsApp Broadcast", key="bc_send_button", use_container_width=True):
             if not bc_message.strip():
                 st.error("Please enter a message.")
             else:
@@ -738,141 +953,19 @@ with tab_broadcast:
                         res_list = asyncio.run(_send_all())
                         successes = sum(1 for r in res_list if r["success"])
                         if successes > 0:
-                            st.success(f"✅ Successfully sent to {successes}/{len(targets)} recipient(s)!")
+                            st.success(f"✅ Dispatched to {successes}/{len(targets)} recipient(s)!")
                         else:
-                            err_msg = res_list[0].get("status") if res_list else "No responses received"
-                            st.error(f"❌ Failed to deliver message: {err_msg}")
+                            err_msg = res_list[0].get("status") if res_list else "No response"
+                            st.error(f"❌ Failed to deliver: {err_msg}")
                         st.dataframe(pd.DataFrame(res_list), use_container_width=True, hide_index=True)
 
-with tab_export:
-    st.subheader("📥 One-Click Data & Ledger Exporter")
-    st.caption("Download comprehensive business ledgers, customer records, debts, and message audits as CSV or official PDF statements.")
-
-    if selected_business_id:
-        biz_name = labels.get(selected_business_id, "Selected Business").split(" (")[0]
-        clean_slug = "".join(c for c in biz_name.lower().replace(" ", "_") if c.isalnum() or c == "_")[:20]
-        st.info(f"🎯 **Filtered Mode Active:** Currently exporting isolated records for **{biz_name}** only.")
-        tx_query = "select * from transactions where business_id = %s order by created_at desc"
-        debts_query = "select * from debts where business_id = %s order by created_at desc"
-        inv_query = "select * from inventory_items where business_id = %s order by created_at desc"
-        q_params = (selected_business_id,)
-        file_prefix = f"{clean_slug}_"
-    else:
-        st.info("🌐 **Global Mode:** Currently exporting all records across the platform. (Use the **Business** dropdown on the left to isolate a single merchant).")
-        tx_query = "select * from transactions order by created_at desc"
-        debts_query = "select * from debts order by created_at desc"
-        inv_query = "select * from inventory_items order by created_at desc"
-        q_params = ()
-        file_prefix = ""
-
-    c_exp1, c_exp2 = st.columns(2)
-    with c_exp1:
-        st.write("#### 📊 Financial & Ledger Data")
-        tx_export_df = query_df(tx_query, q_params)
-        if not tx_export_df.empty:
-            st.download_button(
-                label=f"📄 Download {'Filtered ' if selected_business_id else 'All '}Transactions (CSV)",
-                data=tx_export_df.to_csv(index=False),
-                file_name=f"{file_prefix}transactions.csv",
-                mime="text/csv",
-                key="btn_dl_tx",
-            )
-        else:
-            st.info("No transactions to export yet.")
-
-        debts_export_df = query_df(debts_query, q_params)
-        if not debts_export_df.empty:
-            st.download_button(
-                label=f"📑 Download {'Filtered ' if selected_business_id else 'Customer '}Debts & Credit (CSV)",
-                data=debts_export_df.to_csv(index=False),
-                file_name=f"{file_prefix}debts.csv",
-                mime="text/csv",
-                key="btn_dl_debts",
-            )
-
-        inv_export_df = query_df(inv_query, q_params)
-        if not inv_export_df.empty:
-            st.download_button(
-                label=f"📦 Download {'Filtered ' if selected_business_id else 'All '}Inventory & Stock (CSV)",
-                data=inv_export_df.to_csv(index=False),
-                file_name=f"{file_prefix}inventory.csv",
-                mime="text/csv",
-                key="btn_dl_inv",
-            )
-
-        if selected_business_id:
-            st.write("---")
-            st.write("#### 📑 Official Loan / Bank Statement")
-            st.caption(f"Compiled PDF ledger certified for loan applications & bank review for {biz_name}.")
-            try:
-                import asyncio
-                import concurrent.futures
-                from uuid import UUID
-                from app.core.database import async_session_factory
-                from app.services.receipt_service import ReceiptService
-
-                async def get_stmt():
-                    async with async_session_factory() as db:
-                        r_svc = ReceiptService()
-                        return await r_svc.generate_statement_pdf(db, UUID(selected_business_id), days=30)
-
-                def run_async_safe(coro):
-                    try:
-                        return asyncio.run(coro)
-                    except RuntimeError:
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                            return pool.submit(asyncio.run, coro).result()
-
-                pdf_bytes, pdf_filename, pdf_summary = run_async_safe(get_stmt())
-                st.download_button(
-                    label=f"🏦 Download Certified Statement (PDF) — {biz_name}",
-                    data=pdf_bytes,
-                    file_name=pdf_filename,
-                    mime="application/pdf",
-                    key="btn_dl_stmt_pdf",
-                )
-            except Exception as e:
-                st.warning(f"Could not prepare PDF statement: {e}")
-
-    with c_exp2:
-        st.write("#### 👥 Users & System Audits")
-        users_exp_df = query_df("select id, phone_number, display_name, role, is_active, created_at from users order by created_at desc")
-        if not users_exp_df.empty:
-            st.download_button(
-                label="👥 Download Registered Users Directory (CSV)",
-                data=users_exp_df.to_csv(index=False),
-                file_name="users_directory.csv",
-                mime="text/csv",
-            )
-
-        ai_spend_exp_df = query_df("select * from ai_cost_events order by created_at desc limit 500")
-        if not ai_spend_exp_df.empty:
-            st.download_button(
-                label="💰 Download AI Cost Events Audit (CSV)",
-                data=ai_spend_exp_df.to_csv(index=False),
-                file_name="ai_costs_audit.csv",
-                mime="text/csv",
-            )
-
-with tab_costs:
-    costs = query_df(
-        f"""
-        select spend_date, estimated_spend_usd, ai_calls
-        from v_daily_ai_spend
-        {business_filter}
-        order by spend_date desc
-        limit 30
-        """,
-        params,
-    )
-    if costs.empty:
-        st.info("No AI spend recorded yet.")
-    else:
-        spend = costs.sort_values("spend_date").set_index("spend_date")["estimated_spend_usd"]
-        st.bar_chart(spend)
-        st.dataframe(costs, use_container_width=True, hide_index=True)
-
+# ===========================================================================
+# TAB 5: TASKS & REMINDERS
+# ===========================================================================
 with tab_tasks:
+    st.subheader("⏰ Scheduled Tasks, Reminders & Background Jobs")
+    st.caption("All business follow-ups, scheduled alerts, and cron scheduler telemetry.")
+
     tasks_df = query_df(
         f"""
         select
@@ -881,6 +974,7 @@ with tab_tasks:
             t.title,
             t.description,
             t.due_at,
+            t.is_alarm_mode,
             t.reminder_sent_at,
             t.completed_at
         from tasks t
@@ -896,128 +990,119 @@ with tab_tasks:
     else:
         st.dataframe(tasks_df, use_container_width=True, hide_index=True)
 
-with tab_knowledge:
-    st.subheader("User Knowledge & Vector Embeddings")
+# ===========================================================================
+# TAB 6: COSTS & KNOWLEDGE
+# ===========================================================================
+with tab_costs_knowledge:
+    col_c_left, col_c_right = st.columns(2)
 
-    try:
-        pending_chunks = query_df(
-            """
-            select count(*) as pending_count
-            from user_knowledge_chunks
-            where needs_reembedding is true
-            """
+    with col_c_left:
+        st.subheader("💰 AI API Spend Telemetry")
+        costs = query_df(
+            f"""
+            select spend_date, estimated_spend_usd, ai_calls
+            from v_daily_ai_spend
+            {business_filter}
+            order by spend_date desc
+            limit 30
+            """,
+            params,
         )
-        p_count = int(pending_chunks.iloc[0]["pending_count"]) if not pending_chunks.empty else 0
-    except Exception:
-        p_count = 0
+        if costs.empty:
+            st.info("No AI spend recorded yet.")
+        else:
+            spend = costs.sort_values("spend_date").set_index("spend_date")["estimated_spend_usd"]
+            st.bar_chart(spend)
+            st.dataframe(costs, use_container_width=True, hide_index=True)
 
-    if p_count > 0:
-        st.warning(
-            f"⚠️ **{p_count} Knowledge Chunk(s) with Temporary Pseudo-Embeddings Detected**\n\n"
-            "These chunks were stored while primary embedding providers (Gemini/OpenAI) were offline or unconfigured. "
-            "They use local hash pseudo-vectors and will not match user semantic search queries accurately."
+    with col_c_right:
+        st.subheader("🧠 RAG Knowledge & Vector Embeddings")
+        docs_df = query_df(
+            f"""
+            select
+                d.created_at,
+                b.name as business,
+                d.title,
+                d.source_type,
+                count(c.id) as total_chunks,
+                count(case when c.needs_reembedding is true then 1 end) as pending_reembed
+            from user_knowledge_documents d
+            left join businesses b on b.id = d.business_id
+            left join user_knowledge_chunks c on c.document_id = d.id
+            {"where d.business_id = %s" if selected_business_id else ""}
+            group by d.id, d.created_at, b.name, d.title, d.source_type
+            order by d.created_at desc
+            limit 50
+            """,
+            params,
         )
-        if st.button("🔄 Attempt Re-Embedding Flagged Chunks Now"):
-            import asyncio
-            from app.core.database import async_session_factory
-            from app.services.knowledge_service import KnowledgeService
+        if docs_df.empty:
+            st.info("No knowledge documents stored yet.")
+        else:
+            st.dataframe(docs_df, use_container_width=True, hide_index=True)
 
-            async def _run_reembed():
-                async with async_session_factory() as session:
-                    ks = KnowledgeService()
-                    return await ks.reembed_flagged_chunks(session)
-
-            try:
-                count_done = asyncio.run(_run_reembed())
-                if count_done > 0:
-                    st.success(f"Successfully re-embedded and updated {count_done} chunk(s) with active semantic embeddings!")
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.error("Re-embedding attempted, but primary embedding providers are still offline/exhausted. Verify API keys and quotas.")
-            except Exception as e:
-                st.error(f"Error during re-embedding: {e}")
+    st.markdown("---")
+    st.subheader("📥 Data Export Center")
+    if selected_business_id:
+        biz_name = labels.get(selected_business_id, "Selected Business").split(" (")[0]
+        tx_query = "select * from transactions where business_id = %s order by created_at desc"
+        debts_query = "select * from debts where business_id = %s order by created_at desc"
+        q_params = (selected_business_id,)
+        file_prefix = f"{biz_name.lower().replace(' ', '_')}_"
     else:
-        st.success("✅ All knowledge chunks have active semantic embeddings. No chunks flagged for re-embedding.")
+        tx_query = "select * from transactions order by created_at desc"
+        debts_query = "select * from debts order by created_at desc"
+        q_params = ()
+        file_prefix = "all_"
 
-    docs_df = query_df(
-        f"""
-        select
-            d.created_at,
-            b.name as business,
-            d.title,
-            d.source_type,
-            d.visibility,
-            count(c.id) as total_chunks,
-            count(case when c.needs_reembedding is true then 1 end) as pending_reembed
-        from user_knowledge_documents d
-        left join businesses b on b.id = d.business_id
-        left join user_knowledge_chunks c on c.document_id = d.id
-        {"where d.business_id = %s" if selected_business_id else ""}
-        group by d.id, d.created_at, b.name, d.title, d.source_type, d.visibility
-        order by d.created_at desc
-        limit 50
-        """,
-        params,
-    )
-    if docs_df.empty:
-        st.info("No knowledge documents stored yet.")
-    else:
-        st.dataframe(docs_df, use_container_width=True, hide_index=True)
-
-with tab_invites:
-    st.subheader("🛡️ Pluggable Access Control & User Allowlist")
-    st.markdown("Manage private access strategies: **allowlist** (testers & capacity cap), **invite_code** (self-service codes), or **open**.")
-
-    from app.core.config import settings
-
-    # 1. Live Status & Dynamic Settings from Database
-    sys_settings_df = query_df("select key, value from system_settings where key in ('max_active_users', 'access_mode')")
-    db_settings = dict(zip(sys_settings_df["key"], sys_settings_df["value"])) if not sys_settings_df.empty else {}
-    
-    current_max_users = int(db_settings.get("max_active_users", getattr(settings, "max_active_users", 20)))
-    current_access_mode = db_settings.get("access_mode", getattr(settings, "access_mode", "allowlist")).lower().strip()
-
-    total_users_df = query_df("select count(*) as count from users")
-    current_active_users = int(total_users_df["count"].values[0]) if not total_users_df.empty else 0
-    testers_df = query_df("select count(*) as count from approved_testers")
-    current_testers = int(testers_df["count"].values[0]) if not testers_df.empty else 0
-
-    is_cap_reached = current_active_users >= current_max_users
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Active Access Mode", current_access_mode.upper())
-    m2.metric("Registered Users", f"{current_active_users} / {current_max_users}")
-    m3.metric("Approved Testers", current_testers)
-    m4.metric("Capacity Status", "FULL (Cap Reached)" if is_cap_reached else "OPEN")
-
-    if is_cap_reached:
-        st.warning(
-            f"⚠️ User cap of {current_max_users} reached! Inbound messages from new numbers will be paused. "
-            f"You can increase your limit below or purge automated test records to free up capacity."
-        )
-
-    st.write("---")
-
-    # 2. Configurable Capacity Limit & Access Strategy
-    st.write("### ⚙️ Tester Capacity & Strategy Settings")
-    st.caption("Select and update the number of testers you want, or switch access strategies dynamically.")
-
-    col_cap_cfg, col_mode_cfg = st.columns([1, 1])
-    with col_cap_cfg:
-        with st.form("capacity_limit_form"):
-            new_capacity = st.number_input(
-                "Tester / User Capacity Limit",
-                min_value=1,
-                max_value=50000,
-                value=current_max_users,
-                step=5,
-                help="Set the maximum number of users/testers allowed on the platform before the gate closes.",
+    c_dl1, c_dl2 = st.columns(2)
+    with c_dl1:
+        tx_export_df = query_df(tx_query, q_params)
+        if not tx_export_df.empty:
+            st.download_button(
+                label=f"📄 Download {'Filtered ' if selected_business_id else 'All '}Transactions (CSV)",
+                data=tx_export_df.to_csv(index=False),
+                file_name=f"{file_prefix}transactions.csv",
+                mime="text/csv",
+                use_container_width=True,
             )
-            cap_submit = st.form_submit_button("💾 Save Capacity Limit")
-            if cap_submit:
-                import psycopg
-                from app.core.config import settings
+    with c_dl2:
+        debts_export_df = query_df(debts_query, q_params)
+        if not debts_export_df.empty:
+            st.download_button(
+                label=f"📑 Download {'Filtered ' if selected_business_id else 'Customer '}Debts (CSV)",
+                data=debts_export_df.to_csv(index=False),
+                file_name=f"{file_prefix}debts.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+# ===========================================================================
+# TAB 7: SYSTEM HEALTH & ACCESS
+# ===========================================================================
+with tab_system_access:
+    col_sec1, col_sec2 = st.columns(2)
+
+    with col_sec1:
+        st.subheader("🛡️ Pluggable Access & Capacity")
+        sys_settings_df = query_df("select key, value from system_settings where key in ('max_active_users', 'access_mode')")
+        db_settings = dict(zip(sys_settings_df["key"], sys_settings_df["value"])) if not sys_settings_df.empty else {}
+
+        current_max_users = int(db_settings.get("max_active_users", getattr(settings, "max_active_users", 20)))
+        current_access_mode = db_settings.get("access_mode", getattr(settings, "access_mode", "allowlist")).lower().strip()
+
+        total_users_df = query_df("select count(*) as count from users")
+        current_active_users = int(total_users_df["count"].values[0]) if not total_users_df.empty else 0
+
+        st.metric("Access Strategy", current_access_mode.upper())
+        st.metric("Capacity", f"{current_active_users} / {current_max_users} Users")
+
+        with st.form("capacity_settings_form"):
+            new_capacity = st.number_input("Max User Limit", min_value=1, max_value=50000, value=current_max_users, step=5)
+            modes = ["allowlist", "invite_code", "open"]
+            mode_idx = modes.index(current_access_mode) if current_access_mode in modes else 0
+            new_mode = st.selectbox("Strategy Mode", options=modes, index=mode_idx)
+            if st.form_submit_button("Save Access Settings", use_container_width=True):
                 url = database_url()
                 if url:
                     try:
@@ -1028,559 +1113,36 @@ with tab_invites:
                                     VALUES ('max_active_users', %s, NOW())
                                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
                                 """, (str(int(new_capacity)),))
-                            conn.commit()
-                        settings.max_active_users = int(new_capacity)
-                        st.success(f"✅ Capacity limit updated to {new_capacity}!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to update capacity limit: {e}")
-
-    with col_mode_cfg:
-        with st.form("access_mode_form"):
-            modes = ["allowlist", "invite_code", "open"]
-            mode_idx = modes.index(current_access_mode) if current_access_mode in modes else 0
-            selected_mode = st.selectbox(
-                "Access Control Strategy",
-                options=modes,
-                index=mode_idx,
-                format_func=lambda m: {
-                    "allowlist": "Allowlist (Strict Approved Testers Only)",
-                    "invite_code": "Invite Code (Self-Service Redemptions)",
-                    "open": "Open (Public Self-Registration)",
-                }.get(m, m),
-            )
-            mode_submit = st.form_submit_button("🔄 Switch Access Strategy")
-            if mode_submit:
-                import psycopg
-                from app.core.config import settings
-                url = database_url()
-                if url:
-                    try:
-                        with psycopg.connect(url) as conn:
-                            with conn.cursor() as cur:
                                 cur.execute("""
                                     INSERT INTO system_settings (key, value, updated_at)
                                     VALUES ('access_mode', %s, NOW())
                                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-                                """, (selected_mode.lower().strip(),))
+                                """, (new_mode.lower().strip(),))
                             conn.commit()
-                        settings.access_mode = selected_mode.lower().strip()
-                        st.success(f"✅ Access strategy switched to {selected_mode.upper()}!")
+                        st.success("Access settings updated!")
                         st.cache_data.clear()
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Failed to switch access mode: {e}")
+                        st.error(f"Failed to update access settings: {e}")
 
-    st.write("---")
-
-    # 3. Live Registered Users Directory & Account Management
-    st.write("### 👥 Live Registered Users Directory")
-    st.caption("Manage user accounts in the database. Delete accounts, change roles, or synchronize with the approved testers allowlist.")
-
-    users_breakdown_df = query_df(
-        """
-        select
-            u.id::text as user_id,
-            u.phone_number,
-            coalesce(u.display_name, '-') as display_name,
-            u.role,
-            u.is_active,
-            case
-                when a.id is not null then '✅ Approved Tester'
-                else '🟢 Self-Registered'
-            end as allowlist_status,
-            u.created_at
-        from users u
-        left join approved_testers a on (
-            u.phone_number = a.phone_number 
-            or ('+' || u.phone_number) = a.phone_number 
-            or u.phone_number = replace(a.phone_number, '+', '')
-        )
-        order by u.created_at desc
-        """
-    )
-
-    col_users_info, col_sync_btn = st.columns([3, 1])
-    with col_users_info:
-        st.write(
-            f"**Total Registered Users:** {len(users_breakdown_df)} | "
-            f"**Active Testers:** {current_testers}"
-        )
-    with col_sync_btn:
-        if st.button("🔄 Sync Users with Allowlist", help="Removes any registered user accounts that are not in the approved testers list", key="btn_sync_users_allowlist"):
-            import psycopg
-            from scripts.export_users_table import export as export_users
-
-            url = database_url()
-            if url:
-                try:
-                    with psycopg.connect(url) as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("SELECT phone_number FROM approved_testers")
-                            testers_rows = cur.fetchall()
-                            allowed_phones = set()
-                            for (p,) in testers_rows:
-                                p_str = str(p).strip()
-                                allowed_phones.add(p_str)
-                                allowed_phones.add(p_str.lstrip("+"))
-                                allowed_phones.add(f"+{p_str.lstrip('+')}")
-
-                            cur.execute("SELECT id, phone_number FROM users")
-                            users_rows = cur.fetchall()
-                            deleted = 0
-                            for uid, u_phone in users_rows:
-                                up_str = str(u_phone).strip()
-                                if up_str not in allowed_phones and up_str.lstrip("+") not in allowed_phones:
-                                    cur.execute("DELETE FROM users WHERE id = %s", (uid,))
-                                    deleted += 1
-                        conn.commit()
-
-                    try:
-                        export_users()
-                    except Exception:
-                        pass
-                    remaining = len(users_rows) - deleted
-                    st.success(f"Synced! Cleaned up {deleted} orphan account(s). Total users: {remaining}.")
-                    st.cache_data.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to sync users: {e}")
-
-    if users_breakdown_df.empty:
-        st.info("No registered users in the database yet.")
-    else:
-        st.dataframe(users_breakdown_df, use_container_width=True, hide_index=True)
-
-        col_del_u, col_del_btn = st.columns([3, 1])
-        with col_del_u:
-            user_to_delete = st.selectbox(
-                "Select User to Delete from Database",
-                options=users_breakdown_df["phone_number"].tolist(),
-                format_func=lambda p: (
-                    f"{p} ({users_breakdown_df.loc[users_breakdown_df['phone_number'] == p, 'display_name'].values[0] if p in users_breakdown_df['phone_number'].values else ''} | "
-                    f"{users_breakdown_df.loc[users_breakdown_df['phone_number'] == p, 'allowlist_status'].values[0] if p in users_breakdown_df['phone_number'].values else ''})"
-                ),
-                key="select_user_to_delete",
-            )
-        with col_del_btn:
-            st.write("")
-            st.write("")
-            if user_to_delete and st.button("🗑️ Delete Selected User", key="btn_delete_user"):
-                import psycopg
-                from scripts.export_users_table import export as export_users
-
-                url = database_url()
-                if url:
-                    try:
-                        clean_p = user_to_delete.strip()
-                        norm_p = clean_p.lstrip("+")
-                        with psycopg.connect(url) as conn:
-                            with conn.cursor() as cur:
-                                # 1. Remove from approved_testers if present
-                                cur.execute(
-                                    "DELETE FROM approved_testers WHERE phone_number = %s OR phone_number = %s OR phone_number = %s",
-                                    (clean_p, norm_p, f"+{norm_p}"),
-                                )
-                                # 2. Remove from users
-                                cur.execute(
-                                    "DELETE FROM users WHERE phone_number = %s OR phone_number = %s OR phone_number = %s",
-                                    (clean_p, norm_p, f"+{norm_p}"),
-                                )
-                            conn.commit()
-
-                        try:
-                            export_users()
-                        except Exception:
-                            pass
-                        st.success(f"Successfully deleted user `{user_to_delete}` from the database.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to delete user: {e}")
-
-    st.write("---")
-
-    # 4. Approved Testers Management
-    st.write("### 👥 Approved Testers (Allowlist Mode)")
-    col_add_t, col_list_t = st.columns([1, 2])
-    with col_add_t:
-        with st.form("add_tester_form"):
-            tester_phone = st.text_input("Tester Phone Number", placeholder="+2348012345678")
-            tester_label = st.text_input("Label / Name (Optional)", placeholder="e.g. Amaka - QA Tester")
-            submit_tester = st.form_submit_button("Add Approved Tester")
-
-            if submit_tester and tester_phone.strip():
-                import psycopg
-                url = database_url()
-                if url:
-                    try:
-                        clean_p = tester_phone.strip()
-                        norm_p = clean_p.lstrip("+")
-                        label_val = tester_label.strip() or None
-                        with psycopg.connect(url) as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("""
-                                    INSERT INTO approved_testers (phone_number, label, added_by, added_at)
-                                    VALUES (%s, %s, 'admin', NOW())
-                                    ON CONFLICT (phone_number) DO UPDATE SET label = COALESCE(EXCLUDED.label, approved_testers.label)
-                                """, (norm_p, label_val))
-                            conn.commit()
-                        st.success(f"Added {tester_phone} to approved testers allowlist!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to add tester: {e}")
-
-    with col_list_t:
-        all_testers_df = query_df(
-            """
-            select
-                id::text as id,
-                phone_number,
-                label,
-                added_at,
-                added_by
-            from approved_testers
-            order by added_at desc
-            limit 100
-            """
-        )
-        if all_testers_df.empty:
-            st.info("No approved testers registered yet.")
-        else:
-            st.dataframe(all_testers_df, use_container_width=True, hide_index=True)
-            phone_to_remove = st.selectbox(
-                "Remove Tester from Allowlist",
-                options=all_testers_df["phone_number"].tolist(),
-                key="select_remove_tester",
-            )
-            delete_acc = st.checkbox("Also delete user account from registered users table (Keep in Sync)", value=True, key="cb_delete_user_sync")
-            if phone_to_remove and st.button("🗑️ Remove Selected Tester", key="btn_remove_tester"):
-                import psycopg
-                from scripts.export_users_table import export as export_users
-
-                url = database_url()
-                if url:
-                    try:
-                        clean_p = phone_to_remove.strip()
-                        norm_p = clean_p.lstrip("+")
-                        with psycopg.connect(url) as conn:
-                            with conn.cursor() as cur:
-                                # 1. Remove from approved_testers
-                                cur.execute(
-                                    "DELETE FROM approved_testers WHERE phone_number = %s OR phone_number = %s OR phone_number = %s",
-                                    (clean_p, norm_p, f"+{norm_p}"),
-                                )
-                                # 2. If delete_acc: remove from users
-                                if delete_acc:
-                                    cur.execute(
-                                        "DELETE FROM users WHERE phone_number = %s OR phone_number = %s OR phone_number = %s",
-                                        (clean_p, norm_p, f"+{norm_p}"),
-                                    )
-                            conn.commit()
-
-                        try:
-                            export_users()
-                        except Exception:
-                            pass
-                        msg = f"Removed {phone_to_remove} from allowlist"
-                        if delete_acc:
-                            msg += " and deleted user account"
-                        st.success(f"{msg}.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to remove tester: {e}")
-
-    st.write("---")
-
-    # 3. Invite Codes Management
-    st.write("### 🔑 Invite Codes (Invite-Code Mode)")
-    col_gen, col_stats = st.columns([1, 2])
-    with col_gen:
-        st.write("#### ➕ Generate New Invite Code")
-        with st.form("create_invite_form"):
-            custom_code = st.text_input("Custom Code (Optional)", placeholder="e.g. VIP2026")
-            max_uses = st.number_input("Max Redemptions", min_value=1, max_value=1000, value=1, step=1)
-            expiry_days = st.number_input("Expires in Days (0 = never)", min_value=0, max_value=365, value=0, step=1)
-            submit_create = st.form_submit_button("Generate Code")
-
-            if submit_create:
-                import psycopg
-                import secrets
-                import string
-                from datetime import datetime, timezone, timedelta
-
-                url = database_url()
-                if url:
-                    try:
-                        c_val = custom_code.strip() if custom_code.strip() else "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
-                        exp = datetime.now(timezone.utc) + timedelta(days=expiry_days) if expiry_days > 0 else None
-                        with psycopg.connect(url) as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("""
-                                    INSERT INTO invite_codes (code, max_uses, use_count, is_active, expires_at, created_at)
-                                    VALUES (%s, %s, 0, true, %s, NOW())
-                                """, (c_val, int(max_uses), exp))
-                            conn.commit()
-                        st.success(f"Generated invite code: **{c_val}** (Max uses: {max_uses})")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to generate code: {e}")
-
-    with col_stats:
-        st.write("#### 📋 Active & Historical Codes")
-        codes_df = query_df(
-            """
-            select
-                id::text as id,
-                code,
-                max_uses,
-                use_count,
-                is_active,
-                created_at,
-                expires_at
-            from invite_codes
-            order by created_at desc
-            limit 100
-            """
-        )
-        if codes_df.empty:
-            st.info("No invite codes created yet.")
-        else:
-            st.dataframe(codes_df, use_container_width=True, hide_index=True)
-
-            active_codes_df = codes_df[codes_df["is_active"] == True] if not codes_df.empty else pd.DataFrame()
-            if not active_codes_df.empty:
-                code_to_deact = st.selectbox(
-                    "Select Code to Deactivate",
-                    options=active_codes_df["id"].tolist(),
-                    format_func=lambda cid: (
-                        f"{codes_df.loc[codes_df['id'] == cid, 'code'].values[0] if cid in codes_df['id'].values else cid} ({cid[:8]})"
-                    ),
-                    key="select_code_to_deact",
-                )
-
-                if code_to_deact and st.button("🚫 Deactivate Selected Code", key="btn_deact_code"):
-                    import psycopg
-
-                    url = database_url()
-                    if url:
-                        try:
-                            with psycopg.connect(url) as conn:
-                                with conn.cursor() as cur:
-                                    cur.execute("UPDATE invite_codes SET is_active = false WHERE id = %s", (code_to_deact,))
-                                conn.commit()
-                            st.success("Invite code deactivated.")
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed to deactivate code: {e}")
-
-    st.write("---")
-    st.subheader("📝 Access Waitlist")
-    waitlist_df = query_df(
-        """
-        select phone_number, requested_at
-        from waitlist
-        order by requested_at desc
-        limit 100
-        """
-    )
-    if waitlist_df.empty:
-        st.info("Waitlist is currently empty.")
-    else:
-        st.dataframe(waitlist_df, use_container_width=True, hide_index=True)
-
-with tab_recovery:
-    st.subheader("🔑 Admin-Assisted Account Recovery & Phone Relinking")
-    st.write(
-        "Reclaim an existing business account and relink its entire ledger, message history, "
-        "and activities to a **NEW phone number** (e.g. lost phone, stolen SIM, or new device). "
-        "All historical transactions are permanently preserved."
-    )
-
-    businesses_df = query_df(
-        """
-        select
-            b.id::text as id,
-            b.name,
-            b.phone_number,
-            count(t.id) as transaction_count
-        from businesses b
-        left join transactions t on t.business_id = b.id
-        where b.deleted_at is null
-        group by b.id, b.name, b.phone_number
-        order by count(t.id) desc, b.created_at desc
-        """
-    )
-
-    if businesses_df.empty:
-        st.info("No businesses found.")
-    else:
-        business_options = businesses_df["id"].tolist()
-        selected_rec_b_id = st.selectbox(
-            "Select Account to Recover",
-            options=business_options,
-            format_func=lambda bid: (
-                f"{businesses_df.loc[businesses_df['id'] == bid, 'name'].values[0] if bid in businesses_df['id'].values else bid} "
-                f"({businesses_df.loc[businesses_df['id'] == bid, 'phone_number'].values[0] if bid in businesses_df['id'].values else ''}) "
-                f"[{businesses_df.loc[businesses_df['id'] == bid, 'transaction_count'].values[0] if bid in businesses_df['id'].values else 0} txs]"
-            ),
-            help="Select the business account whose owner needs their number updated.",
-            key="select_account_to_recover",
-        )
-
-        matching_rec_b = businesses_df.loc[businesses_df["id"] == selected_rec_b_id]
-        if not matching_rec_b.empty:
-            curr_phone = matching_rec_b["phone_number"].values[0]
-            curr_txs = matching_rec_b["transaction_count"].values[0]
-        else:
-            curr_phone = "-"
-            curr_txs = 0
-
-        st.info(f"**Current Account Details:** Phone: `{curr_phone}` | Confirmed Transactions: `{curr_txs}`")
-
-        with st.form("account_recovery_form"):
-            new_target_phone = st.text_input(
-                "New Phone Number",
-                placeholder="+2347012345678",
-                help="The user's new active WhatsApp phone number.",
-            )
-            v_method = st.selectbox(
-                "Verification Method",
-                options=[
-                    "Admin Verified (In-person / Call)",
-                    "CAC Registration Document",
-                    "Email Domain Confirmation",
-                    "Historical Transaction Reconciliation",
-                    "Government Issued ID",
-                ],
-            )
-            v_notes = st.text_area(
-                "Verification Notes",
-                placeholder="e.g. Owner verified via phone call from registered business line. Confirmed last 3 transaction amounts.",
-            )
-
-            submit_recovery = st.form_submit_button("⚡ Relink Phone & Restore Account")
-
-            if submit_recovery:
-                if not new_target_phone.strip():
-                    st.error("Please enter a valid new phone number.")
-                else:
-                    import asyncio
-                    from uuid import UUID
-                    from app.core.database import async_session_factory
-                    from app.services.account_recovery_service import AccountRecoveryError, AccountRecoveryService
-
-                    async def _run_recovery():
-                        async with async_session_factory() as session:
-                            service = AccountRecoveryService()
-                            return await service.relink_phone_number(
-                                db=session,
-                                business_id=UUID(selected_rec_b_id),
-                                new_phone_number=new_target_phone.strip(),
-                                verification_method=v_method,
-                                notes=v_notes,
-                                operator="streamlit_admin",
-                            )
-
-                    try:
-                        res = asyncio.run(_run_recovery())
-                        st.success(
-                            f"✅ Account successfully relinked to `{res['new_phone']}`! "
-                            f"All {res['transactions_preserved']} historical transactions preserved."
-                        )
-                        st.cache_data.clear()
-                        st.rerun()
-                    except AccountRecoveryError as are:
-                        st.error(f"Recovery failed: {str(are)}")
-                    except Exception as exc:
-                        st.error(f"Unexpected error: {str(exc)}")
-
-with tab_security:
-    st.subheader("⚙️ Security, Webhook Endpoints & Live Sync")
-    st.caption("Zero-downtime configuration management. All updates persist to PostgreSQL and reflect live across the application.")
-
-    sec_col1, sec_col2 = st.columns(2)
-
-    with sec_col1:
-        st.markdown("#### 🌐 Live Webhook & Domain Sync")
-        st.markdown(
-            "Update your active public domain whenever your server address changes (e.g. AWS, DuckDNS, or local tunnels). "
-            "This ensures client magic links and WhatsApp webhook documentation immediately reflect the live URL."
-        )
-
+    with col_sec2:
+        st.subheader("🌐 Webhook Sync & Admin Security")
         curr_base = get_live_base_url()
-        st.info(f"**Current Base URL:** `{curr_base}`\n\n**WhatsApp Webhook URL:** `{curr_base}/webhooks/whatsapp`")
+        st.markdown(f"**Live Webhook:** `{curr_base}/webhooks/whatsapp`")
 
-        with st.form("form_sync_webhook_url"):
-            new_url_input = st.text_input(
-                "New Public Base URL",
-                value=curr_base,
-                placeholder="https://waasz-sme-api.duckdns.org",
-                help="Enter full URL with https:// and no trailing slash",
-            )
-            submit_url_sync = st.form_submit_button("⚡ Save & Sync Live Endpoint", type="primary")
-
-            if submit_url_sync:
-                if not new_url_input.strip() or not new_url_input.strip().startswith("http"):
-                    st.error("Please enter a valid URL starting with http:// or https://")
-                else:
-                    saved_url = set_live_base_url(new_url_input)
-                    st.success(f"✅ Successfully updated live base URL to `{saved_url}`! All webhook handlers synchronized.")
+        with st.form("webhook_update_form"):
+            new_url_input = st.text_input("Public Base Endpoint", value=curr_base)
+            if st.form_submit_button("Update & Sync Endpoint", use_container_width=True):
+                if new_url_input.strip().startswith("http"):
+                    set_live_base_url(new_url_input)
+                    st.success("Synced endpoint successfully!")
                     st.cache_data.clear()
                     st.rerun()
-
-    with sec_col2:
-        st.markdown("#### 🔐 Change Admin Credentials")
-        st.markdown(
-            "Update your private administrator account name or master password. "
-            "Credentials are encrypted with Argon2id and stored securely in the database with zero hardcoding."
-        )
-
-        with st.form("form_change_admin_creds"):
-            update_username = st.text_input("Account Identifier / Username", value=admin_session.get("sub", ""))
-            current_pass = st.text_input("Current Master Password", type="password")
-            new_pass = st.text_input("New Master Password (min 8 chars)", type="password")
-            confirm_new_pass = st.text_input("Confirm New Master Password", type="password")
-
-            submit_creds = st.form_submit_button("🔒 Update & Encrypt Credentials")
-
-            if submit_creds:
-                if not current_pass:
-                    st.error("Please enter your current master password to authorize this change.")
-                elif not auth_manager.verify_credentials(admin_session.get("sub", ""), current_pass):
-                    st.error("Current password verification failed.")
-                elif not update_username.strip() or len(update_username.strip()) < 3:
-                    st.error("Account name must be at least 3 characters.")
-                elif not new_pass or len(new_pass) < 8:
-                    st.error("New master password must be at least 8 characters.")
-                elif new_pass != confirm_new_pass:
-                    st.error("New passwords do not match.")
                 else:
-                    try:
-                        auth_manager.save_admin_credentials(update_username.strip(), new_pass)
-                        # Re-issue active session token
-                        new_tok = auth_manager.create_session_token(update_username.strip())
-                        st.session_state["admin_session_token"] = new_tok
-                        st.query_params["_sess"] = new_tok
-                        st.success("✅ Credentials successfully updated and re-encrypted with Argon2id!")
-                        time.sleep(0.5)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error saving credentials: {e}")
+                    st.error("Invalid URL format.")
 
-    st.write("---")
-    st.markdown("#### 🛡️ Active Administrative Session Status")
-    st.markdown(
-        f"- **Authenticated Identity:** `{admin_session.get('sub', 'admin')}`\n"
-        f"- **Session Policy:** 7-Day Cryptographic Window\n"
-        f"- **Time Remaining in Session:** `{format_duration(admin_session.get('remaining_seconds', 0))}`\n"
-        f"- **Signature Algorithm:** `HMAC-SHA256 (JWT)`\n"
-        f"- **Anti-Brute-Force Rate Limiting:** Active (Max 5 attempts / 60s cooldown)"
-    )
-
-
+        st.markdown("#### 🛡️ Active Session")
+        st.caption(
+            f"Logged in as: **{admin_session.get('sub', 'admin')}** | "
+            f"Time remaining: **{format_duration(admin_session.get('remaining_seconds', 0))}**"
+        )
