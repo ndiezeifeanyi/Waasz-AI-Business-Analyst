@@ -357,25 +357,35 @@ kpi6.metric("AI Spend (Today)", spend_disp, help="Actual AI model API cost calcu
 st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Business Filtering & Sidebar Controls
 # ---------------------------------------------------------------------------
-businesses = query_df(
+# Business & User Scope Filtering Controls
+# ---------------------------------------------------------------------------
+users_directory = query_df(
     """
-    select id::text, name, phone_number, business_type, subscription_plan, created_at
-    from businesses
-    where deleted_at is null and (is_provisional is false or id in (select business_id from users where business_id is not null))
-    order by created_at desc
-    limit 200
+    select
+        b.id::text as business_id,
+        coalesce(b.name, 'WhatsApp Business') as business_name,
+        coalesce(u.phone_number, b.phone_number) as phone_number,
+        coalesce(u.display_name, b.name) as display_name,
+        b.created_at
+    from businesses b
+    left join users u on u.business_id = b.id
+    where b.deleted_at is null
+    order by b.created_at desc
     """
 )
 
 selected_business_id = None
-labels = {}
-if not businesses.empty:
-    labels = {
-        row["id"]: f"{row['name']} ({row['phone_number']})"
-        for _, row in businesses.iterrows()
-    }
+selected_phone = None
+selected_user_display = None
+user_labels = {}
+
+if not users_directory.empty:
+    for _, row in users_directory.iterrows():
+        b_id = str(row["business_id"])
+        ph = str(row["phone_number"] or "").strip()
+        nm = str(row["business_name"] or "").strip()
+        user_labels[b_id] = f"{ph} — {nm}"
 
 with st.sidebar:
     logo_file = Path(__file__).resolve().parent / "waasz_logo.jpg"
@@ -408,16 +418,21 @@ with st.sidebar:
     st.info(f"🤖 Active AI: `{active_model}`")
 
     st.markdown("---")
-    st.markdown("#### 🏢 Merchant Scope")
-    if labels:
-        selected_business_id = st.selectbox(
-            "Select Business",
-            options=["All", *labels.keys()],
-            format_func=lambda val: labels.get(val, val),
-            label_visibility="collapsed",
+    st.markdown("#### 👤 Merchant & User Scope")
+    if user_labels:
+        scope_choice = st.selectbox(
+            "Select User / Business",
+            options=["All Users & Merchants (Global)", *user_labels.keys()],
+            format_func=lambda val: user_labels.get(val, val),
+            key="sb_user_scope_selector",
+            help="Choose a specific merchant phone number to filter all tabs, metrics, live chat streams, and exports strictly to that user.",
         )
-        if selected_business_id == "All":
-            selected_business_id = None
+        if scope_choice != "All Users & Merchants (Global)":
+            selected_business_id = scope_choice
+            selected_user_display = user_labels.get(scope_choice)
+            matched_user_row = users_directory[users_directory["business_id"] == scope_choice]
+            if not matched_user_row.empty:
+                selected_phone = str(matched_user_row.iloc[0]["phone_number"] or "").strip()
 
     st.markdown("---")
     st.markdown("#### ⚡ Telemetry Pulse")
@@ -439,6 +454,22 @@ params: tuple = ()
 if selected_business_id:
     business_filter = "where business_id = %s"
     params = (selected_business_id,)
+
+if selected_business_id and selected_user_display:
+    st.markdown(
+        f"""
+        <div style="background: rgba(14, 165, 233, 0.1); border: 1px solid rgba(14, 165, 233, 0.35); border-radius: 12px; padding: 12px 18px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between;">
+            <div>
+                <span style="color: #38BDF8; font-weight: 700; font-size: 0.9rem;">👤 ACTIVE USER FOCUS:</span>
+                <span style="color: #FFFFFF; font-weight: 600; margin-left: 8px;">{selected_user_display}</span>
+                <div style="color: #94A3B8; font-size: 0.78rem; margin-top: 2px;">
+                    Filtered view: All metrics, WhatsApp messages, confirmations, and data downloads are scoped strictly to this account.
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ---------------------------------------------------------------------------
 # Structured 7-Tab High-Impact Navigation
@@ -584,11 +615,32 @@ with tab_overview:
 
         reviews_exist = [f for f in feedback_list if f != "-"]
         if reviews_exist:
-            with st.expander(f"💬 Live Customer Feedback & Reviews ({len(reviews_exist)} submitted)"):
-                for idx, r_row in trial_tracker_raw[trial_tracker_raw["review_feedback"].notna()].iterrows():
-                    st.markdown(f"**{r_row['business_name']}** ({r_row['phone_number']}) — {r_row.get('review_rating', 'N/A')}⭐")
-                    st.caption(f"\"{r_row['review_feedback']}\"")
-                    st.divider()
+            fb_items = []
+            for _, r_row in trial_tracker_raw[trial_tracker_raw["review_feedback"].notna()].iterrows():
+                b_nm = str(r_row["business_name"])
+                b_ph = str(r_row["phone_number"])
+                b_rt = str(r_row.get("review_rating") or "N/A")
+                b_txt = str(r_row["review_feedback"])
+                fb_items.append(
+                    f'<div style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.06);">'
+                    f'<div style="font-weight: 600; color: #F8FAFC; font-size: 0.88rem;">{b_nm} <span style="color: #94A3B8; font-size: 0.8rem;">({b_ph})</span> — <span style="color: #FBBF24;">{b_rt} ⭐</span></div>'
+                    f'<div style="color: #CBD5E1; font-size: 0.84rem; font-style: italic; margin-top: 4px;">"{b_txt}"</div>'
+                    f'</div>'
+                )
+            all_fb_html = "".join(fb_items)
+            st.markdown(
+                f"""
+                <details style="background: rgba(17, 24, 39, 0.75); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 12px 18px; margin: 16px 0;">
+                    <summary style="font-weight: 600; cursor: pointer; color: #38BDF8; font-size: 0.92rem; outline: none;">
+                        💬 Customer Feedback & Reviews ({len(reviews_exist)} submitted)
+                    </summary>
+                    <div style="margin-top: 10px;">
+                        {all_fb_html}
+                    </div>
+                </details>
+                """,
+                unsafe_allow_html=True,
+            )
     else:
         st.info("No businesses onboarded yet. New WhatsApp signups will appear here live.")
 
@@ -663,9 +715,15 @@ with tab_messages:
         msg_search = st.text_input("🔍 Search Messages or Phone", placeholder="Type phone, keyword, or error...", key="msg_search_input")
 
     where_clauses = []
-    query_params = list(params)
+    query_params = []
     if selected_business_id:
-        where_clauses.append("m.business_id = %s")
+        if selected_phone:
+            clean_p = selected_phone.lstrip("+")
+            where_clauses.append("(m.business_id = %s or m.to_phone in (%s, %s, %s) or m.from_phone in (%s, %s, %s))")
+            query_params.extend([selected_business_id, selected_phone, clean_p, f"+{clean_p}", selected_phone, clean_p, f"+{clean_p}"])
+        else:
+            where_clauses.append("m.business_id = %s")
+            query_params.append(selected_business_id)
 
     if status_filter == "🔴 Failed Only":
         where_clauses.append("m.status = 'failed'")
@@ -1187,263 +1245,396 @@ with tab_costs_knowledge:
                         st.error(f"Vector search test failed: {e}")
 
     st.markdown("---")
-    st.subheader("📥 Data Export Center")
+    st.subheader("📥 Data Export & Download Center")
     if selected_business_id:
-        biz_name = labels.get(selected_business_id, "Selected Business").split(" (")[0]
+        biz_name = selected_user_display.split(" — ")[-1] if selected_user_display else "Merchant"
+        file_prefix = f"{biz_name.lower().replace(' ', '_')}_"
+        clean_p = selected_phone.lstrip("+") if selected_phone else ""
+
         tx_query = "select * from transactions where business_id = %s order by created_at desc"
         debts_query = "select * from debts where business_id = %s order by created_at desc"
-        q_params = (selected_business_id,)
-        file_prefix = f"{biz_name.lower().replace(' ', '_')}_"
-    else:
-        tx_query = "select * from transactions order by created_at desc"
-        debts_query = "select * from debts order by created_at desc"
-        q_params = ()
-        file_prefix = "all_"
+        msgs_query = """
+            select created_at, direction, status, coalesce(to_phone, from_phone) as phone_number, error_message, body
+            from whatsapp_messages
+            where business_id = %s or to_phone in (%s, %s, %s) or from_phone in (%s, %s, %s)
+            order by created_at desc
+        """
+        q_params_tx = (selected_business_id,)
+        q_params_msgs = (selected_business_id, selected_phone, clean_p, f"+{clean_p}", selected_phone, clean_p, f"+{clean_p}")
 
-    c_dl1, c_dl2 = st.columns(2)
-    with c_dl1:
-        tx_export_df = query_df(tx_query, q_params)
-        if not tx_export_df.empty:
+        c_dl1, c_dl2, c_dl3 = st.columns(3)
+        with c_dl1:
+            tx_export_df = query_df(tx_query, q_params_tx)
+            if not tx_export_df.empty:
+                st.download_button(
+                    label=f"📄 Download Transactions CSV ({len(tx_export_df)})",
+                    data=tx_export_df.to_csv(index=False),
+                    file_name=f"{file_prefix}transactions.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("No transactions for this user.")
+        with c_dl2:
+            debts_export_df = query_df(debts_query, q_params_tx)
+            if not debts_export_df.empty:
+                st.download_button(
+                    label=f"📑 Download Debts CSV ({len(debts_export_df)})",
+                    data=debts_export_df.to_csv(index=False),
+                    file_name=f"{file_prefix}debts.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("No debts recorded.")
+        with c_dl3:
+            msgs_export_df = query_df(msgs_query, q_params_msgs)
+            if not msgs_export_df.empty:
+                st.download_button(
+                    label=f"💬 Download WhatsApp Logs CSV ({len(msgs_export_df)})",
+                    data=msgs_export_df.to_csv(index=False),
+                    file_name=f"{file_prefix}whatsapp_logs.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("No chat messages recorded.")
+
+        # Certified Statement PDF download
+        st.markdown("##### 🏦 Certified Bank & Loan Statement (PDF)")
+        st.caption(f"Compiled, signed official ledger statement for loan review and financial records for {biz_name}.")
+        try:
+            import asyncio
+            from uuid import UUID
+            from app.db.session import async_session_factory
+            from app.services.receipt_service import ReceiptService
+
+            async def _get_pdf():
+                async with async_session_factory() as session:
+                    r_svc = ReceiptService()
+                    return await r_svc.generate_statement_pdf(session, UUID(selected_business_id), days=30)
+
+            pdf_bytes, pdf_filename, pdf_summary = asyncio.run(_get_pdf())
             st.download_button(
-                label=f"📄 Download {'Filtered ' if selected_business_id else 'All '}Transactions (CSV)",
-                data=tx_export_df.to_csv(index=False),
-                file_name=f"{file_prefix}transactions.csv",
-                mime="text/csv",
+                label=f"🏦 Download Official Financial Statement (PDF) — {biz_name}",
+                data=pdf_bytes,
+                file_name=pdf_filename,
+                mime="application/pdf",
                 use_container_width=True,
             )
-    with c_dl2:
-        debts_export_df = query_df(debts_query, q_params)
-        if not debts_export_df.empty:
-            st.download_button(
-                label=f"📑 Download {'Filtered ' if selected_business_id else 'Customer '}Debts (CSV)",
-                data=debts_export_df.to_csv(index=False),
-                file_name=f"{file_prefix}debts.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
+        except Exception as e:
+            st.warning(f"PDF Statement generator unavailable: {e}")
+    else:
+        # Global Downloads
+        c_g1, c_g2, c_g3, c_g4 = st.columns(4)
+        with c_g1:
+            all_users_df = query_df("select id, phone_number, display_name, role, is_active, created_at from users order by created_at desc")
+            if not all_users_df.empty:
+                st.download_button(
+                    label="👥 All Users Directory (CSV)",
+                    data=all_users_df.to_csv(index=False),
+                    file_name="waasz_users_directory.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+        with c_g2:
+            all_tx_df = query_df("select * from transactions order by created_at desc limit 2000")
+            if not all_tx_df.empty:
+                st.download_button(
+                    label="📄 All Transactions (CSV)",
+                    data=all_tx_df.to_csv(index=False),
+                    file_name="all_transactions.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+        with c_g3:
+            all_debts_df = query_df("select * from debts order by created_at desc limit 2000")
+            if not all_debts_df.empty:
+                st.download_button(
+                    label="📑 All Customer Debts (CSV)",
+                    data=all_debts_df.to_csv(index=False),
+                    file_name="all_debts.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+        with c_g4:
+            ai_cost_df = query_df("select * from ai_cost_events order by created_at desc limit 1000")
+            if not ai_cost_df.empty:
+                st.download_button(
+                    label="💰 AI Spend Events (CSV)",
+                    data=ai_cost_df.to_csv(index=False),
+                    file_name="ai_cost_events.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
 # ===========================================================================
 # TAB 7: SYSTEM HEALTH & ACCESS
 # ===========================================================================
 with tab_system_access:
-    col_sec1, col_sec2 = st.columns(2)
+    sys_settings_df = query_df("select key, value from system_settings where key in ('max_active_users', 'access_mode')")
+    db_settings = dict(zip(sys_settings_df["key"], sys_settings_df["value"])) if not sys_settings_df.empty else {}
 
-    with col_sec1:
-        st.subheader("🛡️ Pluggable Access & Capacity")
-        sys_settings_df = query_df("select key, value from system_settings where key in ('max_active_users', 'access_mode')")
-        db_settings = dict(zip(sys_settings_df["key"], sys_settings_df["value"])) if not sys_settings_df.empty else {}
+    current_max_users = int(db_settings.get("max_active_users", getattr(settings, "max_active_users", 20)))
+    current_access_mode = db_settings.get("access_mode", getattr(settings, "access_mode", "allowlist")).lower().strip()
 
-        current_max_users = int(db_settings.get("max_active_users", getattr(settings, "max_active_users", 20)))
-        current_access_mode = db_settings.get("access_mode", getattr(settings, "access_mode", "allowlist")).lower().strip()
+    total_users_df = query_df("select count(*) as count from users")
+    current_active_users = int(total_users_df["count"].values[0]) if not total_users_df.empty else 0
 
-        total_users_df = query_df("select count(*) as count from users")
-        current_active_users = int(total_users_df["count"].values[0]) if not total_users_df.empty else 0
+    subtab_strat, subtab_invites, subtab_testers, subtab_webhook = st.tabs([
+        "🛡️ Access Strategy & Capacity",
+        "🎟️ Invite Codes Management",
+        "👥 Approved Testers Allowlist",
+        "🌐 Webhook & Admin Security",
+    ])
 
-        m_col1, m_col2 = st.columns(2)
-        m_col1.metric("Current Mode", current_access_mode.upper())
-        m_col2.metric("User Capacity", f"{current_active_users} / {current_max_users}")
+    with subtab_strat:
+        col_st1, col_st2 = st.columns(2)
+        with col_st1:
+            st.subheader("🛡️ Current Strategy & Capacity")
+            m_col1, m_col2 = st.columns(2)
+            m_col1.metric("Active Strategy", current_access_mode.upper())
+            m_col2.metric("User Capacity", f"{current_active_users} / {current_max_users}")
 
-        with st.form("capacity_settings_form"):
-            new_capacity = st.number_input("Max User Limit", min_value=1, max_value=50000, value=current_max_users, step=5)
-            modes = ["allowlist", "invite_code", "open"]
-            mode_idx = modes.index(current_access_mode) if current_access_mode in modes else 0
-            new_mode = st.selectbox("Access Strategy Mode", options=modes, index=mode_idx, help="'invite_code' requires users to text a valid code to register. 'allowlist' restricts to approved testers. 'open' admits all users.")
-            if st.form_submit_button("Save Strategy & Capacity", use_container_width=True):
-                url = database_url()
-                if url:
-                    try:
-                        with psycopg.connect(url) as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("""
-                                    INSERT INTO system_settings (key, value, updated_at)
-                                    VALUES ('max_active_users', %s, NOW())
-                                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-                                """, (str(int(new_capacity)),))
-                                cur.execute("""
-                                    INSERT INTO system_settings (key, value, updated_at)
-                                    VALUES ('access_mode', %s, NOW())
-                                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-                                """, (new_mode.lower().strip(),))
-                            conn.commit()
-                        st.success("Access settings updated successfully!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to update access settings: {e}")
+            if current_access_mode == "open":
+                st.info("🟢 **Open Access Mode**: Anyone messaging Waasz on WhatsApp can register and onboard immediately up to the capacity limit.")
+            elif current_access_mode == "invite_code":
+                st.warning("🎟️ **Invite Code Mode**: New users must provide a valid invite code to register. Open the **🎟️ Invite Codes Management** tab to generate and send codes.")
+            elif current_access_mode == "allowlist":
+                st.warning("👥 **Allowlist Mode**: Only phone numbers added to the approved testers directory can register. Open the **👥 Approved Testers Allowlist** tab to manage numbers.")
 
-        st.markdown("---")
-        st.subheader("👥 Approved Testers (Allowlist)")
-        testers_df = query_df("select phone_number, label, added_at from approved_testers order by added_at desc")
-        if not testers_df.empty:
-            st.dataframe(testers_df, use_container_width=True, hide_index=True)
-
-        with st.form("add_tester_form"):
-            c_t1, c_t2 = st.columns(2)
-            new_t_phone = c_t1.text_input("Phone Number", placeholder="2348012345678", key="input_tester_phone")
-            new_t_label = c_t2.text_input("Name / Label", placeholder="Chief Obi", key="input_tester_label")
-            if st.form_submit_button("➕ Add Approved Tester", use_container_width=True):
-                if new_t_phone.strip():
+        with col_st2:
+            st.subheader("⚙️ Update Strategy Settings")
+            with st.form("capacity_settings_form"):
+                new_capacity = st.number_input("Max User Limit", min_value=1, max_value=50000, value=current_max_users, step=5)
+                modes = ["open", "invite_code", "allowlist"]
+                mode_idx = modes.index(current_access_mode) if current_access_mode in modes else 0
+                new_mode = st.selectbox(
+                    "Access Strategy Mode",
+                    options=modes,
+                    index=mode_idx,
+                    format_func=lambda m: "🟢 Open Access" if m == "open" else ("🎟️ Invite Code Only" if m == "invite_code" else "👥 Allowlist Only"),
+                )
+                if st.form_submit_button("Save Strategy & Capacity", use_container_width=True):
                     url = database_url()
                     if url:
                         try:
-                            clean_t_phone = new_t_phone.strip().replace(" ", "").replace("+", "")
                             with psycopg.connect(url) as conn:
                                 with conn.cursor() as cur:
                                     cur.execute("""
-                                        INSERT INTO approved_testers (phone_number, label, added_at)
-                                        VALUES (%s, %s, NOW())
-                                        ON CONFLICT (phone_number) DO UPDATE SET label = EXCLUDED.label
-                                    """, (clean_t_phone, new_t_label.strip() or "Tester"))
+                                        INSERT INTO system_settings (key, value, updated_at)
+                                        VALUES ('max_active_users', %s, NOW())
+                                        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                                    """, (str(int(new_capacity)),))
+                                    cur.execute("""
+                                        INSERT INTO system_settings (key, value, updated_at)
+                                        VALUES ('access_mode', %s, NOW())
+                                        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                                    """, (new_mode.lower().strip(),))
                                 conn.commit()
-                            st.success(f"Added {clean_t_phone} to approved testers!")
+                            st.success("Access settings updated successfully!")
                             st.cache_data.clear()
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Error adding tester: {e}")
-                else:
-                    st.error("Please enter a phone number.")
+                            st.error(f"Failed to update access settings: {e}")
 
-    with col_sec2:
+    with subtab_invites:
         st.subheader("🎟️ Invite Code Operations & Dispatch")
         st.caption("Generate private access codes, track usages, and dispatch invite codes directly to users via WhatsApp.")
 
         import secrets
         default_gen_code = f"WAASZ-{secrets.token_hex(3).upper()}"
 
-        with st.form("create_invite_code_form"):
-            st.markdown("##### ➕ Create New Invite Code")
-            c_ic1, c_ic2 = st.columns(2)
-            gen_code_input = c_ic1.text_input("Invite Code", value=default_gen_code, key="input_new_invite_code")
-            gen_max_uses = c_ic2.number_input("Max Uses", min_value=1, max_value=500, value=1, step=1, key="input_new_invite_uses")
+        col_ic_create, col_ic_table = st.columns([1, 2])
+        with col_ic_create:
+            with st.form("create_invite_code_form"):
+                st.markdown("##### ➕ Create New Invite Code")
+                gen_code_input = st.text_input("Invite Code", value=default_gen_code, key="input_new_invite_code")
+                gen_max_uses = st.number_input("Max Uses", min_value=1, max_value=500, value=1, step=1, key="input_new_invite_uses")
+                gen_expiry_days = st.selectbox("Expires In", options=["Never", "7 Days", "14 Days", "30 Days"], index=0, key="select_invite_expiry")
+                gen_send_phone = st.text_input("WhatsApp Recipient (Optional)", placeholder="2348012345678", key="input_invite_send_phone")
 
-            c_ic3, c_ic4 = st.columns(2)
-            gen_expiry_days = c_ic3.selectbox("Expires In", options=["Never", "7 Days", "14 Days", "30 Days"], index=0, key="select_invite_expiry")
-            gen_send_phone = c_ic4.text_input("WhatsApp Recipient (Optional)", placeholder="2348012345678", key="input_invite_send_phone")
-
-            if st.form_submit_button("🎟️ Generate & Save Invite Code", use_container_width=True):
-                code_to_create = gen_code_input.strip().upper()
-                if not code_to_create:
-                    st.error("Invite code cannot be empty.")
-                else:
-                    url = database_url()
-                    if url:
-                        try:
-                            exp_sql = "NULL"
-                            if gen_expiry_days == "7 Days":
-                                exp_sql = "NOW() + interval '7 days'"
-                            elif gen_expiry_days == "14 Days":
-                                exp_sql = "NOW() + interval '14 days'"
-                            elif gen_expiry_days == "30 Days":
-                                exp_sql = "NOW() + interval '30 days'"
-
-                            with psycopg.connect(url) as conn:
-                                with conn.cursor() as cur:
-                                    cur.execute(f"""
-                                        INSERT INTO invite_codes (code, max_uses, use_count, is_active, expires_at, created_at)
-                                        VALUES (%s, %s, 0, true, {exp_sql}, NOW())
-                                        ON CONFLICT (code) DO UPDATE SET max_uses = EXCLUDED.max_uses, is_active = true
-                                    """, (code_to_create, int(gen_max_uses)))
-                                conn.commit()
-
-                            st.success(f"Invite code '{code_to_create}' generated successfully!")
-
-                            # If recipient phone was supplied, dispatch directly via WhatsApp
-                            if gen_send_phone.strip():
-                                clean_dest_phone = gen_send_phone.strip().replace(" ", "").replace("+", "")
-                                import asyncio
-                                from app.services.whatsapp_client import WhatsAppClient
-
-                                async def _send_code():
-                                    client = WhatsAppClient()
-                                    msg = (
-                                        f"🎉 Hello! You've been invited to access *Waasz AI Business Manager*.\n\n"
-                                        f"Your exclusive private invite code is:\n"
-                                        f"👉 *{code_to_create}*\n\n"
-                                        f"Simply reply directly to this chat with your code to activate your account!"
-                                    )
-                                    return await client.send_text(to_phone=clean_dest_phone, body=msg)
-
-                                send_res = asyncio.run(_send_code())
-                                if getattr(send_res, "message_id", None):
-                                    st.success(f"📲 Dispatched invite code to {clean_dest_phone} via WhatsApp!")
-                                else:
-                                    st.warning(f"Invite code saved, but WhatsApp dispatch failed: {getattr(send_res, 'error_message', 'Check Meta token')}")
-
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed to create invite code: {e}")
-
-        # Active Invite Codes Table
-        st.markdown("##### 📋 Active & Historic Invite Codes")
-        invite_codes_df = query_df(
-            """
-            select
-                code,
-                use_count || ' / ' || max_uses as usage,
-                case
-                    when is_active is false then '🔴 Revoked'
-                    when expires_at is not null and expires_at < now() then '⏳ Expired'
-                    when use_count >= max_uses then '⚪ Exhausted'
-                    else '🟢 Active'
-                end as status,
-                expires_at,
-                created_at
-            from invite_codes
-            order by created_at desc
-            limit 50
-            """
-        )
-        if invite_codes_df.empty:
-            st.info("No invite codes created yet.")
-        else:
-            st.dataframe(invite_codes_df, use_container_width=True, hide_index=True)
-
-            # Quick revoke action
-            active_codes = invite_codes_df[invite_codes_df["status"] == "🟢 Active"]["code"].tolist()
-            if active_codes:
-                with st.form("revoke_code_form"):
-                    code_to_revoke = st.selectbox("Revoke Code", options=active_codes, key="sel_code_revoke")
-                    if st.form_submit_button("🚫 Revoke Selected Code", use_container_width=True):
+                if st.form_submit_button("🎟️ Generate & Save Invite Code", use_container_width=True):
+                    code_to_create = gen_code_input.strip().upper()
+                    if not code_to_create:
+                        st.error("Invite code cannot be empty.")
+                    else:
                         url = database_url()
                         if url:
                             try:
+                                exp_sql = "NULL"
+                                if gen_expiry_days == "7 Days":
+                                    exp_sql = "NOW() + interval '7 days'"
+                                elif gen_expiry_days == "14 Days":
+                                    exp_sql = "NOW() + interval '14 days'"
+                                elif gen_expiry_days == "30 Days":
+                                    exp_sql = "NOW() + interval '30 days'"
+
                                 with psycopg.connect(url) as conn:
                                     with conn.cursor() as cur:
-                                        cur.execute("UPDATE invite_codes SET is_active = false WHERE code = %s", (code_to_revoke,))
+                                        cur.execute(f"""
+                                            INSERT INTO invite_codes (code, max_uses, use_count, is_active, expires_at, created_at)
+                                            VALUES (%s, %s, 0, true, {exp_sql}, NOW())
+                                            ON CONFLICT (code) DO UPDATE SET max_uses = EXCLUDED.max_uses, is_active = true
+                                        """, (code_to_create, int(gen_max_uses)))
                                     conn.commit()
-                                st.success(f"Revoked {code_to_revoke} successfully.")
+
+                                st.success(f"Invite code '{code_to_create}' generated successfully!")
+
+                                # If recipient phone was supplied, dispatch directly via WhatsApp
+                                if gen_send_phone.strip():
+                                    clean_dest_phone = gen_send_phone.strip().replace(" ", "").replace("+", "")
+                                    import asyncio
+                                    from app.services.whatsapp_client import WhatsAppClient
+
+                                    async def _send_code():
+                                        client = WhatsAppClient()
+                                        msg = (
+                                            f"🎉 Hello! You've been invited to access *Waasz AI Business Manager*.\n\n"
+                                            f"Your exclusive private invite code is:\n"
+                                            f"👉 *{code_to_create}*\n\n"
+                                            f"Simply reply directly to this chat with your code to activate your account!"
+                                        )
+                                        return await client.send_text(to_phone=clean_dest_phone, body=msg)
+
+                                    send_res = asyncio.run(_send_code())
+                                    if getattr(send_res, "message_id", None):
+                                        st.success(f"📲 Dispatched invite code to {clean_dest_phone} via WhatsApp!")
+                                    else:
+                                        st.warning(f"Invite code saved, but WhatsApp dispatch failed: {getattr(send_res, 'error_message', 'Check Meta token')}")
+
                                 st.cache_data.clear()
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"Revoke failed: {e}")
+                                st.error(f"Failed to create invite code: {e}")
 
-        # Waitlist View
-        st.markdown("##### ⏳ Waitlist Inquiries ('REQUEST' SMS/Chat)")
-        waitlist_df = query_df("select phone_number, registered_at, notes from waitlist order by registered_at desc limit 20")
-        if waitlist_df.empty:
-            st.caption("No users currently waiting on the waitlist.")
-        else:
-            st.dataframe(waitlist_df, use_container_width=True, hide_index=True)
+        with col_ic_table:
+            st.markdown("##### 📋 Active & Historic Invite Codes")
+            invite_codes_df = query_df(
+                """
+                select
+                    code,
+                    use_count || ' / ' || max_uses as usage,
+                    case
+                        when is_active is false then '🔴 Revoked'
+                        when expires_at is not null and expires_at < now() then '⏳ Expired'
+                        when use_count >= max_uses then '⚪ Exhausted'
+                        else '🟢 Active'
+                    end as status,
+                    expires_at,
+                    created_at
+                from invite_codes
+                order by created_at desc
+                limit 50
+                """
+            )
+            if invite_codes_df.empty:
+                st.info("No invite codes created yet.")
+            else:
+                st.dataframe(invite_codes_df, use_container_width=True, hide_index=True)
 
-        st.markdown("---")
-        st.subheader("🌐 Webhook Sync & Admin Security")
-        curr_base = get_live_base_url()
-        st.markdown(f"**Live Webhook:** `{curr_base}/webhooks/whatsapp`")
+                # Quick revoke action
+                active_codes = invite_codes_df[invite_codes_df["status"] == "🟢 Active"]["code"].tolist()
+                if active_codes:
+                    with st.form("revoke_code_form"):
+                        code_to_revoke = st.selectbox("Revoke Code", options=active_codes, key="sel_code_revoke")
+                        if st.form_submit_button("🚫 Revoke Selected Code", use_container_width=True):
+                            url = database_url()
+                            if url:
+                                try:
+                                    with psycopg.connect(url) as conn:
+                                        with conn.cursor() as cur:
+                                            cur.execute("UPDATE invite_codes SET is_active = false WHERE code = %s", (code_to_revoke,))
+                                        conn.commit()
+                                    st.success(f"Revoked {code_to_revoke} successfully.")
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Revoke failed: {e}")
 
-        with st.form("webhook_update_form"):
-            new_url_input = st.text_input("Public Base Endpoint", value=curr_base)
-            if st.form_submit_button("Update & Sync Endpoint", use_container_width=True):
-                if new_url_input.strip().startswith("http"):
-                    set_live_base_url(new_url_input)
-                    st.success("Synced endpoint successfully!")
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.error("Invalid URL format.")
+            # Waitlist View
+            st.markdown("##### ⏳ Waitlist Inquiries ('REQUEST' SMS/Chat)")
+            waitlist_df = query_df("select phone_number, registered_at, notes from waitlist order by registered_at desc limit 20")
+            if waitlist_df.empty:
+                st.caption("No users currently waiting on the waitlist.")
+            else:
+                st.dataframe(waitlist_df, use_container_width=True, hide_index=True)
 
-        st.markdown("#### 🛡️ Active Session")
-        st.caption(
-            f"Logged in as: **{admin_session.get('sub', 'admin')}** | "
-            f"Time remaining: **{format_duration(admin_session.get('remaining_seconds', 0))}**"
-        )
+    with subtab_testers:
+        st.subheader("👥 Approved Testers Allowlist")
+        st.caption("Manage testers permitted to interact when Allowlist mode is active.")
+
+        col_add_t, col_view_t = st.columns([1, 2])
+        with col_add_t:
+            with st.form("add_tester_form"):
+                st.markdown("##### ➕ Add Approved Tester")
+                new_t_phone = st.text_input("Phone Number", placeholder="2348012345678", key="input_tester_phone")
+                new_t_label = st.text_input("Name / Label", placeholder="Chief Obi", key="input_tester_label")
+                if st.form_submit_button("Add to Allowlist", use_container_width=True):
+                    if new_t_phone.strip():
+                        url = database_url()
+                        if url:
+                            try:
+                                clean_t_phone = new_t_phone.strip().replace(" ", "").replace("+", "")
+                                with psycopg.connect(url) as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("""
+                                            INSERT INTO approved_testers (phone_number, label, added_at)
+                                            VALUES (%s, %s, NOW())
+                                            ON CONFLICT (phone_number) DO UPDATE SET label = EXCLUDED.label
+                                        """, (clean_t_phone, new_t_label.strip() or "Tester"))
+                                    conn.commit()
+                                st.success(f"Added {clean_t_phone} to approved testers!")
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error adding tester: {e}")
+                    else:
+                        st.error("Please enter a phone number.")
+
+        with col_view_t:
+            st.markdown("##### 📋 Approved Testers Directory")
+            testers_df = query_df("select phone_number, label, added_at from approved_testers order by added_at desc")
+            if not testers_df.empty:
+                st.dataframe(testers_df, use_container_width=True, hide_index=True)
+                phone_to_remove = st.selectbox("Select Tester to Remove", options=testers_df["phone_number"].tolist(), key="sel_rem_tester")
+                if st.button("🗑️ Remove Tester", key="btn_remove_tester"):
+                    url = database_url()
+                    if url:
+                        try:
+                            with psycopg.connect(url) as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("DELETE FROM approved_testers WHERE phone_number = %s", (phone_to_remove,))
+                                conn.commit()
+                            st.success(f"Removed {phone_to_remove} from allowlist.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to remove tester: {e}")
+            else:
+                st.info("No approved testers registered yet.")
+
+    with subtab_webhook:
+        col_w1, col_w2 = st.columns(2)
+        with col_w1:
+            st.subheader("🌐 Webhook Sync")
+            curr_base = get_live_base_url()
+            st.markdown(f"**Live Webhook:** `{curr_base}/webhooks/whatsapp`")
+
+            with st.form("webhook_update_form"):
+                new_url_input = st.text_input("Public Base Endpoint", value=curr_base)
+                if st.form_submit_button("Update & Sync Endpoint", use_container_width=True):
+                    if new_url_input.strip().startswith("http"):
+                        set_live_base_url(new_url_input)
+                        st.success("Synced endpoint successfully!")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("Invalid URL format.")
+
+        with col_w2:
+            st.subheader("🛡️ Admin Security Session")
+            st.caption(
+                f"Logged in as: **{admin_session.get('sub', 'admin')}** | "
+                f"Time remaining: **{format_duration(admin_session.get('remaining_seconds', 0))}**"
+            )
