@@ -15,8 +15,9 @@ from app.services.whatsapp_client import WhatsAppClient
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_NUDGE_TEXT = "Didn't hear from you today — want to log anything before it slips your mind? 📝\n(You can reply with a sale, expense, task, or say hi!)"
-UTILITY_TEMPLATE_NAME = "daily_inactivity_checkin_v1"
+DEFAULT_NUDGE_TEXT = "Bookkeeping alert: Your daily business ledger is open for reconciliation. Please reply with any sales or expenses recorded today to finalize your closing balance."
+UTILITY_TEMPLATE_NAME = "daily_ledger_reconciliation_v1"
+FALLBACK_TEMPLATE_NAME = "daily_inactivity_checkin_v1"
 
 
 class InactivityNudgeService:
@@ -141,7 +142,7 @@ class InactivityNudgeService:
         recent_msgs = out_res.scalars().all()
         for msg in recent_msgs:
             body = (msg.body or "").lower()
-            if "didn't hear from you today" in body or "daily_inactivity_checkin" in body:
+            if "didn't hear from you today" in body or "daily_inactivity_checkin" in body or "ledger_reconciliation" in body:
                 logger.info("User %s was already nudged today; skipping", user.id)
                 return False
 
@@ -157,8 +158,36 @@ class InactivityNudgeService:
             outbound_text = DEFAULT_NUDGE_TEXT
         else:
             # Outside 24h window: Must use approved WhatsApp utility template
-            logger.info("User %s outside 24h window; sending utility template %s", user.id, UTILITY_TEMPLATE_NAME)
-            template_components = [
+            logger.info("User %s outside 24h window; dispatching utility template %s", user.id, UTILITY_TEMPLATE_NAME)
+            
+            date_str = now_local.strftime("%b %d")
+            tx_count_today = 0
+            if user.business_id:
+                from app.models.transaction import Transaction
+                from sqlalchemy import func
+                start_of_day_utc = now_local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+                tx_count_today = (
+                    await db.scalar(
+                        select(func.count(Transaction.id)).where(
+                            Transaction.business_id == user.business_id,
+                            Transaction.created_at >= start_of_day_utc,
+                        )
+                    )
+                    or 0
+                )
+
+            # Components for 3 variables: Name, Date, Entries
+            components_3 = [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": user_name},
+                        {"type": "text", "text": date_str},
+                        {"type": "text", "text": str(tx_count_today)},
+                    ],
+                }
+            ]
+            components_1 = [
                 {
                     "type": "body",
                     "parameters": [
@@ -166,29 +195,51 @@ class InactivityNudgeService:
                     ],
                 }
             ]
-            # Try en_US (which matches Meta registration), fallback to en if needed
+
+            # Attempt 1: daily_ledger_reconciliation_v1 with 3 params (lang 'en')
             send_res = await self.whatsapp.send_template(
                 user.phone_number,
                 template_name=UTILITY_TEMPLATE_NAME,
-                language_code="en_US",
-                components=template_components,
+                language_code="en",
+                components=components_3,
             )
-            if not send_res.success:
+
+            # Attempt 2: if parameter count mismatch, retry with 1 param
+            if not send_res.success and ("132000" in str(send_res.error_message) or "parameter" in str(send_res.error_message).lower()):
                 send_res = await self.whatsapp.send_template(
                     user.phone_number,
                     template_name=UTILITY_TEMPLATE_NAME,
                     language_code="en",
-                    components=template_components,
+                    components=components_1,
                 )
+
+            # Attempt 3: if language en_US needed
+            if not send_res.success and "132001" in str(send_res.error_message):
+                send_res = await self.whatsapp.send_template(
+                    user.phone_number,
+                    template_name=UTILITY_TEMPLATE_NAME,
+                    language_code="en_US",
+                    components=components_3,
+                )
+
+            # Attempt 4: If not yet approved on Meta, fallback to active template
+            if not send_res.success and ("132001" in str(send_res.error_message) or "does not exist" in str(send_res.error_message).lower()):
+                logger.info("Utility template %s not yet active on Meta. Trying fallback %s", UTILITY_TEMPLATE_NAME, FALLBACK_TEMPLATE_NAME)
+                send_res = await self.whatsapp.send_template(
+                    user.phone_number,
+                    template_name=FALLBACK_TEMPLATE_NAME,
+                    language_code="en_US",
+                    components=components_1,
+                )
+                if not send_res.success:
+                    send_res = await self.whatsapp.send_template(
+                        user.phone_number,
+                        template_name=FALLBACK_TEMPLATE_NAME,
+                        language_code="en",
+                        components=components_1,
+                    )
+
             outbound_text = f"[Template: {UTILITY_TEMPLATE_NAME}] {DEFAULT_NUDGE_TEXT}"
-            
-            # Fallback: If template is not yet approved or fails on Meta, fallback to freeform text
-            if not send_res.success:
-                logger.warning("Template send failed for user %s (%s). Falling back to send_text.", user.id, send_res.error_message)
-                fallback_res = await self.whatsapp.send_text(user.phone_number, DEFAULT_NUDGE_TEXT)
-                if fallback_res.success:
-                    send_res = fallback_res
-                    outbound_text = DEFAULT_NUDGE_TEXT
 
         if user.business_id:
             await self.ledger.record_outbound_message(
