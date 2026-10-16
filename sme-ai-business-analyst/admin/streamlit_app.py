@@ -1417,8 +1417,9 @@ with tab_costs_knowledge:
         st.caption(f"Compiled, signed official ledger statement for loan review and financial records for {biz_name}.")
         try:
             import asyncio
+            import concurrent.futures
             from uuid import UUID
-            from app.db.session import async_session_factory
+            from app.core.database import async_session_factory
             from app.services.receipt_service import ReceiptService
 
             async def _get_pdf():
@@ -1426,7 +1427,18 @@ with tab_costs_knowledge:
                     r_svc = ReceiptService()
                     return await r_svc.generate_statement_pdf(session, UUID(export_biz_id), days=30)
 
-            pdf_bytes, pdf_filename, pdf_summary = asyncio.run(_get_pdf())
+            def _run_async_pdf():
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                            return executor.submit(lambda: asyncio.run(_get_pdf())).result()
+                    else:
+                        return loop.run_until_complete(_get_pdf())
+                except RuntimeError:
+                    return asyncio.run(_get_pdf())
+
+            pdf_bytes, pdf_filename, pdf_summary = _run_async_pdf()
             st.download_button(
                 label=f"🏦 Download Official Financial Statement (PDF) — {biz_name}",
                 data=pdf_bytes,
