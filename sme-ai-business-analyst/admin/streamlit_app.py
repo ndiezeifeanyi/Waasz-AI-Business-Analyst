@@ -42,8 +42,17 @@ st.markdown(
 /* Import Clean Professional Typography */
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600&display=swap');
 
-html, body, [class*="css"], .stMarkdown, .stText, p, span, div, h1, h2, h3, h4 {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+html, body, .stMarkdown, p, h1, h2, h3, h4, [data-testid="stMetricLabel"], [data-testid="stMetricValue"], [data-testid="stCaptionContainer"] {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Ensure Material icon glyphs and SVG arrows never render as raw ligature text */
+[data-testid="stExpander"] summary span,
+[data-testid="stExpander"] summary svg,
+[data-testid="stExpanderToggleIcon"],
+[class*="material-symbols"],
+[class*="material-icons"] {
+    font-family: inherit !important;
 }
 
 /* Background & Canvas Foundations */
@@ -65,7 +74,7 @@ div[data-testid="stMetric"] {
     -webkit-backdrop-filter: blur(16px);
     border: 1px solid rgba(255, 255, 255, 0.07);
     border-radius: 14px;
-    padding: 16px 20px;
+    padding: 14px 16px;
     box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.45);
     transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), 
                 border-color 0.25s cubic-bezier(0.16, 1, 0.3, 1), 
@@ -79,15 +88,17 @@ div[data-testid="stMetric"]:hover {
 }
 
 [data-testid="stMetricLabel"] p {
-    font-size: 0.78rem !important;
+    font-size: 0.72rem !important;
     font-weight: 600 !important;
     color: #94A3B8 !important;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.05em;
+    white-space: normal !important;
+    line-height: 1.25 !important;
 }
 
 [data-testid="stMetricValue"] div {
-    font-size: 1.85rem !important;
+    font-size: 1.75rem !important;
     font-weight: 700 !important;
     color: #F8FAFC !important;
     letter-spacing: -0.03em;
@@ -251,6 +262,18 @@ def metric_value(df: pd.DataFrame, column: str, default: str = "0") -> str:
     return str(value)
 
 
+def metric_int(df: pd.DataFrame, column: str, default: int = 0) -> str:
+    if df.empty or column not in df:
+        return str(default)
+    value = df.iloc[0][column]
+    if pd.isna(value):
+        return str(default)
+    try:
+        return f"{int(float(value)):,}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
 # ---------------------------------------------------------------------------
 # Dynamic Real-Time Health & Alert Sync (No Stale Banners)
 # ---------------------------------------------------------------------------
@@ -319,17 +342,17 @@ with top_col2:
 metrics = query_df("select * from v_founder_dashboard_metrics")
 kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
 
-kpi1.metric("Active Businesses", metric_value(metrics, "active_businesses"), help="Total live SME businesses registered and active")
-kpi2.metric("Inbound (24h)", metric_value(metrics, "inbound_messages_24h"), help="WhatsApp messages received in the last 24 hours")
-kpi3.metric("Outbound (24h)", metric_value(metrics, "outbound_messages_24h"), help="Dispatches sent in the last 24 hours")
-kpi4.metric("Pending Drafts", metric_value(metrics, "pending_confirmations"), help="Draft records currently awaiting user confirmation")
-kpi5.metric("Confirmed Sales (24h)", metric_value(metrics, "confirmed_records_24h"), help="Sales and expenses officially written to ledger in last 24h")
+kpi1.metric("Merchants", metric_int(metrics, "active_businesses"), help="Total live SME businesses registered and active")
+kpi2.metric("Inbound (24h)", metric_int(metrics, "inbound_messages_24h"), help="WhatsApp messages received in the last 24 hours")
+kpi3.metric("Outbound (24h)", metric_int(metrics, "outbound_messages_24h"), help="Dispatches sent in the last 24 hours")
+kpi4.metric("Pending Drafts", metric_int(metrics, "pending_confirmations"), help="Draft records currently awaiting user confirmation")
+kpi5.metric("Confirmed (24h)", metric_int(metrics, "confirmed_records_24h"), help="Sales and expenses officially written to ledger in last 24h")
 
 try:
     spend_disp = f"${float(metric_value(metrics, 'ai_spend_today_usd', '0')):.4f}"
 except (ValueError, TypeError):
     spend_disp = "$0.0000"
-kpi6.metric("AI Spend Today", spend_disp, help="Actual AI model API cost calculated from today's token usage")
+kpi6.metric("AI Spend (Today)", spend_disp, help="Actual AI model API cost calculated from today's token usage")
 
 st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
@@ -799,7 +822,14 @@ with tab_confirmations:
                     except Exception as e:
                         st.error(f"Failed to reject draft: {e}")
     else:
-        st.success("🎉 No pending confirmations waiting for reply. All records are resolved.")
+        st.markdown(
+            """
+            <div style="padding: 12px 16px; border-radius: 10px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); color: #94A3B8; font-size: 0.85rem;">
+                ✨ 0 pending confirmations waiting for reply. All draft records are resolved.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
     st.markdown("#### 📜 Recent Confirmation History")
@@ -1017,29 +1047,144 @@ with tab_costs_knowledge:
 
     with col_c_right:
         st.subheader("🧠 RAG Knowledge & Vector Embeddings")
-        docs_df = query_df(
-            f"""
+        st.caption("How RAG works: External documents & long-term conversation memories are embedded with pgvector (768-dim) and injected into LLM context on matching user queries.")
+
+        # Real-time vector store statistics
+        rag_stats = query_df(
+            """
             select
-                d.created_at,
-                b.name as business,
-                d.title,
-                d.source_type,
-                count(c.id) as total_chunks,
-                count(case when c.needs_reembedding is true then 1 end) as pending_reembed
-            from user_knowledge_documents d
-            left join businesses b on b.id = d.business_id
-            left join user_knowledge_chunks c on c.document_id = d.id
-            {"where d.business_id = %s" if selected_business_id else ""}
-            group by d.id, d.created_at, b.name, d.title, d.source_type
-            order by d.created_at desc
-            limit 50
-            """,
-            params,
+                (select count(*) from user_knowledge_documents) as total_docs,
+                (select count(*) from user_knowledge_chunks) as total_chunks,
+                (select count(*) from user_knowledge_chunks where needs_reembedding is true) as pending_chunks,
+                (select count(*) from conversation_memories) as total_memories
+            """
         )
-        if docs_df.empty:
-            st.info("No knowledge documents stored yet.")
-        else:
-            st.dataframe(docs_df, use_container_width=True, hide_index=True)
+        r_docs = int(rag_stats.iloc[0].get("total_docs", 0) or 0) if not rag_stats.empty else 0
+        r_chunks = int(rag_stats.iloc[0].get("total_chunks", 0) or 0) if not rag_stats.empty else 0
+        r_pend = int(rag_stats.iloc[0].get("pending_chunks", 0) or 0) if not rag_stats.empty else 0
+        r_mem = int(rag_stats.iloc[0].get("total_memories", 0) or 0) if not rag_stats.empty else 0
+
+        c_stat1, c_stat2, c_stat3 = st.columns(3)
+        c_stat1.metric("Catalogs / Docs", r_docs)
+        c_stat2.metric("Embedded Chunks", r_chunks)
+        c_stat3.metric("Durable Memories", r_mem)
+
+        if r_pend > 0:
+            st.warning(f"⚠️ {r_pend} chunk(s) flagged with fallback embeddings awaiting background re-embedding.")
+
+        tab_rag_docs, tab_rag_mems, tab_rag_test = st.tabs(["📄 Catalogs & Docs", "💭 Durable Memories", "🔍 Test Semantic Retrieval"])
+
+        with tab_rag_docs:
+            docs_df = query_df(
+                f"""
+                select
+                    d.created_at,
+                    b.name as business,
+                    d.title,
+                    d.source_type,
+                    count(c.id) as total_chunks
+                from user_knowledge_documents d
+                left join businesses b on b.id = d.business_id
+                left join user_knowledge_chunks c on c.document_id = d.id
+                {"where d.business_id = %s" if selected_business_id else ""}
+                group by d.id, d.created_at, b.name, d.title, d.source_type
+                order by d.created_at desc
+                limit 50
+                """,
+                params,
+            )
+            if docs_df.empty:
+                st.info("No knowledge documents stored yet. Save price lists or shop catalogs via WhatsApp to see them indexed.")
+            else:
+                st.dataframe(docs_df, use_container_width=True, hide_index=True)
+
+        with tab_rag_mems:
+            mem_df = query_df(
+                f"""
+                select
+                    m.created_at,
+                    b.name as business,
+                    m.memory_type,
+                    m.content
+                from conversation_memories m
+                left join businesses b on b.id = m.business_id
+                {"where m.business_id = %s" if selected_business_id else ""}
+                order by m.created_at desc
+                limit 50
+                """,
+                params,
+            )
+            if mem_df.empty:
+                st.info("No durable conversation memories compacted yet. Memories are automatically generated from active conversations.")
+            else:
+                st.dataframe(mem_df, use_container_width=True, hide_index=True)
+
+            if st.button("⚡ Force Run Conversation Compaction", key="btn_run_compaction", use_container_width=True):
+                with st.spinner("Compacting idle conversations into vector memories..."):
+                    try:
+                        import asyncio
+                        from app.db.session import async_session_factory
+                        from app.services.memory_service import MemoryService
+
+                        async def _compact():
+                            async with async_session_factory() as session:
+                                mem_svc = MemoryService()
+                                return await mem_svc.compact_idle_conversations(session)
+
+                        compacted = asyncio.run(_compact())
+                        st.success(f"Compaction completed: {compacted} conversation session(s) compacted into durable vector memories.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Compaction error: {e}")
+
+        with tab_rag_test:
+            test_query = st.text_input("Enter Semantic Query", placeholder="e.g. price of bag of rice or shop address", key="rag_test_q")
+            if st.button("🚀 Run Vector Search", key="btn_run_vector_search", use_container_width=True) and test_query.strip():
+                with st.spinner("Searching pgvector database..."):
+                    try:
+                        import asyncio
+                        from app.services.embedding_service import EmbeddingService
+
+                        async def _run_search():
+                            emb_svc = EmbeddingService()
+                            vec = await emb_svc.embed_query(test_query.strip())
+                            vec_str = "[" + ",".join(str(f) for f in vec) + "]"
+                            url = database_url()
+                            results = []
+                            with psycopg.connect(url) as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        SELECT 'document_chunk' as source, chunk_content as text,
+                                               1 - (embedding <=> %s::vector) as similarity
+                                        FROM user_knowledge_chunks
+                                        WHERE embedding IS NOT NULL
+                                        ORDER BY embedding <=> %s::vector
+                                        LIMIT 3
+                                    """, (vec_str, vec_str))
+                                    for r in cur.fetchall():
+                                        results.append({"Source": "Knowledge Chunk", "Score": f"{float(r[2])*100:.1f}%", "Content": r[1]})
+
+                                    cur.execute("""
+                                        SELECT 'conversation_memory' as source, content as text,
+                                               1 - (embedding <=> %s::vector) as similarity
+                                        FROM conversation_memories
+                                        WHERE embedding IS NOT NULL
+                                        ORDER BY embedding <=> %s::vector
+                                        LIMIT 3
+                                    """, (vec_str, vec_str))
+                                    for r in cur.fetchall():
+                                        results.append({"Source": "Durable Memory", "Score": f"{float(r[2])*100:.1f}%", "Content": r[1]})
+                            return results
+
+                        matches = asyncio.run(_run_search())
+                        if matches:
+                            st.success(f"Found {len(matches)} semantic matches:")
+                            st.dataframe(pd.DataFrame(matches), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No matching records found in vector store.")
+                    except Exception as e:
+                        st.error(f"Vector search test failed: {e}")
 
     st.markdown("---")
     st.subheader("📥 Data Export Center")
@@ -1094,15 +1239,16 @@ with tab_system_access:
         total_users_df = query_df("select count(*) as count from users")
         current_active_users = int(total_users_df["count"].values[0]) if not total_users_df.empty else 0
 
-        st.metric("Access Strategy", current_access_mode.upper())
-        st.metric("Capacity", f"{current_active_users} / {current_max_users} Users")
+        m_col1, m_col2 = st.columns(2)
+        m_col1.metric("Current Mode", current_access_mode.upper())
+        m_col2.metric("User Capacity", f"{current_active_users} / {current_max_users}")
 
         with st.form("capacity_settings_form"):
             new_capacity = st.number_input("Max User Limit", min_value=1, max_value=50000, value=current_max_users, step=5)
             modes = ["allowlist", "invite_code", "open"]
             mode_idx = modes.index(current_access_mode) if current_access_mode in modes else 0
-            new_mode = st.selectbox("Strategy Mode", options=modes, index=mode_idx)
-            if st.form_submit_button("Save Access Settings", use_container_width=True):
+            new_mode = st.selectbox("Access Strategy Mode", options=modes, index=mode_idx, help="'invite_code' requires users to text a valid code to register. 'allowlist' restricts to approved testers. 'open' admits all users.")
+            if st.form_submit_button("Save Strategy & Capacity", use_container_width=True):
                 url = database_url()
                 if url:
                     try:
@@ -1119,13 +1265,168 @@ with tab_system_access:
                                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
                                 """, (new_mode.lower().strip(),))
                             conn.commit()
-                        st.success("Access settings updated!")
+                        st.success("Access settings updated successfully!")
                         st.cache_data.clear()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to update access settings: {e}")
 
+        st.markdown("---")
+        st.subheader("👥 Approved Testers (Allowlist)")
+        testers_df = query_df("select phone_number, label, added_at from approved_testers order by added_at desc")
+        if not testers_df.empty:
+            st.dataframe(testers_df, use_container_width=True, hide_index=True)
+
+        with st.form("add_tester_form"):
+            c_t1, c_t2 = st.columns(2)
+            new_t_phone = c_t1.text_input("Phone Number", placeholder="2348012345678", key="input_tester_phone")
+            new_t_label = c_t2.text_input("Name / Label", placeholder="Chief Obi", key="input_tester_label")
+            if st.form_submit_button("➕ Add Approved Tester", use_container_width=True):
+                if new_t_phone.strip():
+                    url = database_url()
+                    if url:
+                        try:
+                            clean_t_phone = new_t_phone.strip().replace(" ", "").replace("+", "")
+                            with psycopg.connect(url) as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        INSERT INTO approved_testers (phone_number, label, added_at)
+                                        VALUES (%s, %s, NOW())
+                                        ON CONFLICT (phone_number) DO UPDATE SET label = EXCLUDED.label
+                                    """, (clean_t_phone, new_t_label.strip() or "Tester"))
+                                conn.commit()
+                            st.success(f"Added {clean_t_phone} to approved testers!")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error adding tester: {e}")
+                else:
+                    st.error("Please enter a phone number.")
+
     with col_sec2:
+        st.subheader("🎟️ Invite Code Operations & Dispatch")
+        st.caption("Generate private access codes, track usages, and dispatch invite codes directly to users via WhatsApp.")
+
+        import secrets
+        default_gen_code = f"WAASZ-{secrets.token_hex(3).upper()}"
+
+        with st.form("create_invite_code_form"):
+            st.markdown("##### ➕ Create New Invite Code")
+            c_ic1, c_ic2 = st.columns(2)
+            gen_code_input = c_ic1.text_input("Invite Code", value=default_gen_code, key="input_new_invite_code")
+            gen_max_uses = c_ic2.number_input("Max Uses", min_value=1, max_value=500, value=1, step=1, key="input_new_invite_uses")
+
+            c_ic3, c_ic4 = st.columns(2)
+            gen_expiry_days = c_ic3.selectbox("Expires In", options=["Never", "7 Days", "14 Days", "30 Days"], index=0, key="select_invite_expiry")
+            gen_send_phone = c_ic4.text_input("WhatsApp Recipient (Optional)", placeholder="2348012345678", key="input_invite_send_phone")
+
+            if st.form_submit_button("🎟️ Generate & Save Invite Code", use_container_width=True):
+                code_to_create = gen_code_input.strip().upper()
+                if not code_to_create:
+                    st.error("Invite code cannot be empty.")
+                else:
+                    url = database_url()
+                    if url:
+                        try:
+                            exp_sql = "NULL"
+                            if gen_expiry_days == "7 Days":
+                                exp_sql = "NOW() + interval '7 days'"
+                            elif gen_expiry_days == "14 Days":
+                                exp_sql = "NOW() + interval '14 days'"
+                            elif gen_expiry_days == "30 Days":
+                                exp_sql = "NOW() + interval '30 days'"
+
+                            with psycopg.connect(url) as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute(f"""
+                                        INSERT INTO invite_codes (code, max_uses, use_count, is_active, expires_at, created_at)
+                                        VALUES (%s, %s, 0, true, {exp_sql}, NOW())
+                                        ON CONFLICT (code) DO UPDATE SET max_uses = EXCLUDED.max_uses, is_active = true
+                                    """, (code_to_create, int(gen_max_uses)))
+                                conn.commit()
+
+                            st.success(f"Invite code '{code_to_create}' generated successfully!")
+
+                            # If recipient phone was supplied, dispatch directly via WhatsApp
+                            if gen_send_phone.strip():
+                                clean_dest_phone = gen_send_phone.strip().replace(" ", "").replace("+", "")
+                                import asyncio
+                                from app.services.whatsapp_client import WhatsAppClient
+
+                                async def _send_code():
+                                    client = WhatsAppClient()
+                                    msg = (
+                                        f"🎉 Hello! You've been invited to access *Waasz AI Business Manager*.\n\n"
+                                        f"Your exclusive private invite code is:\n"
+                                        f"👉 *{code_to_create}*\n\n"
+                                        f"Simply reply directly to this chat with your code to activate your account!"
+                                    )
+                                    return await client.send_text(to_phone=clean_dest_phone, body=msg)
+
+                                send_res = asyncio.run(_send_code())
+                                if getattr(send_res, "message_id", None):
+                                    st.success(f"📲 Dispatched invite code to {clean_dest_phone} via WhatsApp!")
+                                else:
+                                    st.warning(f"Invite code saved, but WhatsApp dispatch failed: {getattr(send_res, 'error_message', 'Check Meta token')}")
+
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to create invite code: {e}")
+
+        # Active Invite Codes Table
+        st.markdown("##### 📋 Active & Historic Invite Codes")
+        invite_codes_df = query_df(
+            """
+            select
+                code,
+                use_count || ' / ' || max_uses as usage,
+                case
+                    when is_active is false then '🔴 Revoked'
+                    when expires_at is not null and expires_at < now() then '⏳ Expired'
+                    when use_count >= max_uses then '⚪ Exhausted'
+                    else '🟢 Active'
+                end as status,
+                expires_at,
+                created_at
+            from invite_codes
+            order by created_at desc
+            limit 50
+            """
+        )
+        if invite_codes_df.empty:
+            st.info("No invite codes created yet.")
+        else:
+            st.dataframe(invite_codes_df, use_container_width=True, hide_index=True)
+
+            # Quick revoke action
+            active_codes = invite_codes_df[invite_codes_df["status"] == "🟢 Active"]["code"].tolist()
+            if active_codes:
+                with st.form("revoke_code_form"):
+                    code_to_revoke = st.selectbox("Revoke Code", options=active_codes, key="sel_code_revoke")
+                    if st.form_submit_button("🚫 Revoke Selected Code", use_container_width=True):
+                        url = database_url()
+                        if url:
+                            try:
+                                with psycopg.connect(url) as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("UPDATE invite_codes SET is_active = false WHERE code = %s", (code_to_revoke,))
+                                    conn.commit()
+                                st.success(f"Revoked {code_to_revoke} successfully.")
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Revoke failed: {e}")
+
+        # Waitlist View
+        st.markdown("##### ⏳ Waitlist Inquiries ('REQUEST' SMS/Chat)")
+        waitlist_df = query_df("select phone_number, registered_at, notes from waitlist order by registered_at desc limit 20")
+        if waitlist_df.empty:
+            st.caption("No users currently waiting on the waitlist.")
+        else:
+            st.dataframe(waitlist_df, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
         st.subheader("🌐 Webhook Sync & Admin Security")
         curr_base = get_live_base_url()
         st.markdown(f"**Live Webhook:** `{curr_base}/webhooks/whatsapp`")

@@ -1635,21 +1635,17 @@ class WhatsAppWebhookProcessor:
                 words = [w.strip() for w in raw_text.split() if w.strip()]
                 alpha_words = [w for w in words if any(c.isalpha() for c in w)]
 
-                # For a name without an explicit suffix, it MUST be at least 2 words, all starting with uppercase letters, and have NO digits at all
-                is_proper_cased = (
-                    len(alpha_words) >= 2
-                    and all(w[0].isalpha() and w[0].isupper() for w in alpha_words)
-                    and not any(c.isdigit() for c in raw_text)
-                )
-
+                # Only accept implicit name without prefix if it has an unambiguous business entity suffix
+                # (e.g. 'Emeka Supermarket', 'Adaora Boutique', 'Apex Ventures') AND the stage is explicitly awaiting_business_name
                 if (
-                    not is_disqualified
+                    stage == "awaiting_business_name"
+                    and not is_disqualified
                     and not has_math
                     and not has_currency_or_qty
                     and alpha_count >= 3
-                    and 1 <= len(words) <= 4
+                    and 2 <= len(words) <= 4
                     and len(raw_text) <= 35
-                    and (has_biz_suffix or is_proper_cased)
+                    and has_biz_suffix
                 ):
                     shop_name = raw_text.strip().strip("\"'")
 
