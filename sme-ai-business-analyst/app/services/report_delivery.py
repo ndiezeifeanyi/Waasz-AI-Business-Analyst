@@ -126,27 +126,16 @@ class ReportDeliveryService:
                         else:
                             result = await self.whatsapp.send_text(recipient_phone, message)
                     else:
-                        # Outside 24h window: dispatch approved Meta Utility Template
+                        # Outside 24h window: dispatch approved Meta Utility Template task_reminder_alert_v1
                         formatted_time_val = format_confirmation_time(task_due, settings.local_timezone)
-                        template_components = [
-                            {
-                                "type": "body",
-                                "parameters": [
-                                    {"type": "text", "text": task.title},
-                                    {"type": "text", "text": formatted_time_val},
-                                ],
-                            }
-                        ]
-                        result = await self.whatsapp.send_template(
-                            recipient_phone,
-                            template_name="task_reminder_alert_v1",
-                            language_code="en",
-                            components=template_components,
+                        result = await self._dispatch_task_reminder_template(
+                            recipient_phone, task.title, formatted_time_val
                         )
 
                     sent_count += 1
+                    logged_msg = f"[Template: task_reminder_alert_v1] {message}" if not is_within_24h else message
                     await self.ledger.record_outbound_message(
-                        db, business.id, recipient_phone, message, result
+                        db, business.id, recipient_phone, logged_msg, result
                     )
                     await db.commit()
                 except Exception:
@@ -185,24 +174,13 @@ class ReportDeliveryService:
                         if is_within_24h:
                             result = await self.whatsapp.send_text(recipient_phone, stop_msg)
                         else:
-                            template_components = [
-                                {
-                                    "type": "body",
-                                    "parameters": [
-                                        {"type": "text", "text": f"Stopped: {task.title}"},
-                                        {"type": "text", "text": "Reply to reschedule"},
-                                    ],
-                                }
-                            ]
-                            result = await self.whatsapp.send_template(
-                                recipient_phone,
-                                template_name="task_reminder_alert_v1",
-                                language_code="en",
-                                components=template_components,
+                            result = await self._dispatch_task_reminder_template(
+                                recipient_phone, f"Stopped: {task.title}", "Reply to reschedule"
                             )
                         sent_count += 1
+                        logged_stop = f"[Template: task_reminder_alert_v1] {stop_msg}" if not is_within_24h else stop_msg
                         await self.ledger.record_outbound_message(
-                            db, business.id, recipient_phone, stop_msg, result
+                            db, business.id, recipient_phone, logged_stop, result
                         )
                         await db.commit()
                         continue
@@ -219,31 +197,82 @@ class ReportDeliveryService:
                     else:
                         task_due = task.due_at.replace(tzinfo=UTC) if task.due_at.tzinfo is None else task.due_at
                         formatted_time_val = format_confirmation_time(task_due, settings.local_timezone)
-                        template_components = [
-                            {
-                                "type": "body",
-                                "parameters": [
-                                    {"type": "text", "text": task.title},
-                                    {"type": "text", "text": formatted_time_val},
-                                ],
-                            }
-                        ]
-                        result = await self.whatsapp.send_template(
-                            recipient_phone,
-                            template_name="task_reminder_alert_v1",
-                            language_code="en",
-                            components=template_components,
+                        result = await self._dispatch_task_reminder_template(
+                            recipient_phone, task.title, formatted_time_val
                         )
 
                     sent_count += 1
+                    logged_repeat = f"[Template: task_reminder_alert_v1] {message}" if not is_within_24h else message
                     await self.ledger.record_outbound_message(
-                        db, business.id, recipient_phone, message, result
+                        db, business.id, recipient_phone, logged_repeat, result
                     )
                     await db.commit()
                 except Exception:
                     await db.rollback()
                     logger.exception("Failed to send repeat reminder for alarm task %s", task.id)
+
         return sent_count
+
+    async def _dispatch_task_reminder_template(
+        self,
+        recipient_phone: str,
+        title: str,
+        time_str: str,
+    ):
+        """
+        Dispatches approved Meta Utility Template task_reminder_alert_v1 with resilient parameter fallback.
+        """
+        clean_title = str(title).strip()
+        if len(clean_title) > 100:
+            clean_title = clean_title[:97] + "..."
+
+        components_2 = [
+            {
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": clean_title},
+                    {"type": "text", "text": str(time_str)},
+                ],
+            }
+        ]
+        components_1 = [
+            {
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": f"{clean_title} ({time_str})"},
+                ],
+            }
+        ]
+
+        # Attempt 1: 2 params, language 'en'
+        res = await self.whatsapp.send_template(
+            recipient_phone,
+            template_name="task_reminder_alert_v1",
+            language_code="en",
+            components=components_2,
+        )
+
+        # Attempt 2: 1 param fallback if template was configured with 1 placeholder
+        if not res.success and ("132000" in str(res.error_message) or "parameter" in str(res.error_message).lower()):
+            logger.info("Retrying task_reminder_alert_v1 with 1 parameter for %s", recipient_phone)
+            res = await self.whatsapp.send_template(
+                recipient_phone,
+                template_name="task_reminder_alert_v1",
+                language_code="en",
+                components=components_1,
+            )
+
+        # Attempt 3: en_US language fallback
+        if not res.success and "132001" in str(res.error_message):
+            logger.info("Retrying task_reminder_alert_v1 with language en_US for %s", recipient_phone)
+            res = await self.whatsapp.send_template(
+                recipient_phone,
+                template_name="task_reminder_alert_v1",
+                language_code="en_US",
+                components=components_2,
+            )
+
+        return res
 
     async def _send_reports(self, report_type: str, business_id: UUID | None = None) -> int:
         sent_count = 0
