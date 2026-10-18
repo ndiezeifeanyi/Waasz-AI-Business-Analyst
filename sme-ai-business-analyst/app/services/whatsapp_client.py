@@ -91,6 +91,23 @@ class WhatsAppClient:
         }
         return await self._post(payload)
 
+    async def send_image_bytes(
+        self,
+        to_phone: str,
+        image_bytes: bytes,
+        caption: str | None = None,
+        mime_type: str = "image/png",
+    ) -> WhatsAppSendResult:
+        """Upload image bytes to Meta and send to the specified WhatsApp phone number."""
+        if not self._is_configured:
+            return WhatsAppSendResult(
+                skipped=True, error_message="WhatsApp credentials are not set"
+            )
+        media_id = await self.upload_media(image_bytes, mime_type)
+        if not media_id:
+            return WhatsAppSendResult(error_message="Failed to upload image to WhatsApp media service")
+        return await self.send_image(to_phone, media_id, caption)
+
     async def send_document(
         self, to_phone: str, media_id: str, filename: str, caption: str | None = None
     ) -> WhatsAppSendResult:

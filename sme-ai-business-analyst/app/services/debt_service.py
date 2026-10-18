@@ -229,16 +229,49 @@ class DebtService:
         items = [d.notes for d in debts if d.notes]
         items_str = f" for {', '.join(items[:2])}" if items else ""
 
-        draft = (
-            f"Here is a draft reminder message for you to review and forward to *{customer.name}*:\n\n"
-            f"---\n"
+        reminder_body = (
             f"Hello {customer.name},\n\n"
             f"Trust you're having a productive week. This is a gentle reminder regarding the outstanding balance of "
             f"*{format_naira(total_owed)}*{items_str}, {due_str}.\n\n"
             f"Kindly let us know once payment has been made or share the transfer confirmation. If you have any questions, feel free to reach out.\n\n"
             f"Thank you for your valued patronage!\n\n"
             f"Warm regards,\n"
-            f"*{biz_name}*\n"
-            f"---"
+            f"*{biz_name}*"
+        )
+
+        import urllib.parse
+        clean_phone = ""
+        if customer.phone_number:
+            digits = "".join(c for c in customer.phone_number if c.isdigit())
+            if digits.startswith("0") and len(digits) == 11:
+                clean_phone = "234" + digits[1:]
+            elif digits.startswith("234"):
+                clean_phone = digits
+            elif len(digits) >= 10:
+                clean_phone = digits
+
+        encoded_body = urllib.parse.quote(reminder_body.replace("*", ""))
+        if clean_phone:
+            wa_link = f"https://wa.me/{clean_phone}?text={encoded_body}"
+            action_prompt = (
+                f"📲 *1-Tap WhatsApp Forward Link:*\n"
+                f"{wa_link}\n\n"
+                f"_(Tap the link to open WhatsApp directly with {customer.name} and send this reminder)_"
+            )
+        else:
+            wa_link = f"https://wa.me/?text={encoded_body}"
+            action_prompt = (
+                f"📲 *1-Tap WhatsApp Forward Link:*\n"
+                f"{wa_link}\n\n"
+                f"_(Tap the link to open WhatsApp, pick {customer.name}, and send this reminder)_"
+            )
+
+        draft = (
+            f"Here is a draft reminder message for you to review and forward to *{customer.name}*:\n\n"
+            f"---\n"
+            f"{reminder_body}\n"
+            f"---\n\n"
+            f"{action_prompt}"
         )
         return draft
+
