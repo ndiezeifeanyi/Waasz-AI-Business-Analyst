@@ -47,7 +47,7 @@ DEFAULT_MODELS: dict[tuple[Provider, Capability], str] = {
     ("groq", "audio"): "whisper-large-v3-turbo",
     ("groq", "image_gen"): "",
     ("openai", "chat"): "gpt-4o-mini",
-    ("openai", "vision"): "gpt-4o-mini",
+    ("openai", "vision"): "gpt-4o",
     ("openai", "embeddings"): "text-embedding-3-small",
     ("openai", "audio"): "whisper-1",
     ("openai", "image_gen"): "gpt-image-1",
@@ -440,7 +440,7 @@ class ModelResolver:
             return DEFAULT_MODELS[("openai", "chat")]
 
         elif capability == "vision":
-            priority_list = ["gpt-4o-mini", "gpt-4o"]
+            priority_list = ["gpt-4o", "gpt-4o-mini"]
             matched = [target for target in priority_list if target in model_ids]
             if matched:
                 self._candidates_cache[("openai", "vision")] = matched

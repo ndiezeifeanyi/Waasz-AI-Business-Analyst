@@ -50,6 +50,7 @@ from app.services.task_service import TaskService
 from app.services.staff_service import StaffService
 from app.services.unified_report_service import UnifiedReportService, sanitize_whatsapp_clean_text
 from app.services.whatsapp_client import WhatsAppClient
+from app.utils.financial_reconciler import verify_and_reconcile_financial_totals
 from app.utils.reminder_parser import format_confirmation_time, parse_reminder_time
 
 logger = logging.getLogger(__name__)
@@ -518,6 +519,10 @@ class AgentService:
             "  * DETERMINING RECORD TYPE (SALES VS EXPENSES):\n"
             "    - If the page header is 'SINGLE CASH', 'CASH SALES', 'DAILY SALES', 'SALES RECORD', or if the user caption says 'Sales made' or lists goods sold, set record_type='sale'.\n"
             "    - Only set record_type='expense' if the document explicitly says 'Expenses', 'Purchases', 'Bills', or user says 'Expenses made'.\n"
+            "  * STRICT ZERO-ARITHMETIC RULE (NO MENTAL MATH IN TEXT):\n"
+            "    - NEVER guess, estimate, or invent a Grand Total in text! You do NOT have a calculator in token space.\n"
+            "    - You MUST IMMEDIATELY call `record_batch_transactions` with the extracted line items whenever the user sends a photo of sales/expenses or asks to record/log them. DO NOT just write out the list in plain text asking 'Should I record these?'. Let `record_batch_transactions` stage the records into the database and calculate the exact mathematical total deterministically!\n"
+            "    - If you ever list items and state a Grand Total in text, the total MUST be the exact mathematical sum of each line item. Never state round figures like ₦1,000,000 unless the line items mathematically sum to that exact number.\n"
             "  * ALWAYS call the `record_batch_transactions` tool with all line items in the list.\n"
             "  * Batch receipts support from 1 to 100+ items with complete itemized breakdown and repeating page headers.\n"
             "- SINGLE-ITEM RECEIPT / EXPENSE: When the photo or message contains only 1 single good or expense, call `record_transaction` with the specific item name, amount, and occurred_at_date if written.\n"
@@ -772,8 +777,10 @@ class AgentService:
                         return sanitize_whatsapp_clean_text(self._resolve_fallback_tool_reply(last_tool_results))
                     return "I'm here. How can I help you today?"
                 if self._has_tool_failure(last_tool_results) and self._is_generic_success_phrase(reply_text):
-                    return sanitize_whatsapp_clean_text(self._resolve_fallback_tool_reply(last_tool_results))
-                return sanitize_whatsapp_clean_text(reply_text)
+                    fallback = self._resolve_fallback_tool_reply(last_tool_results)
+                    return sanitize_whatsapp_clean_text(verify_and_reconcile_financial_totals(fallback))
+                reconciled_text = verify_and_reconcile_financial_totals(reply_text)
+                return sanitize_whatsapp_clean_text(reconciled_text)
 
             iteration += 1
             messages.append(current_ai_msg)
@@ -826,8 +833,9 @@ class AgentService:
             if self._has_tool_failure(last_tool_results) and self._is_generic_success_phrase(final_text):
                 return sanitize_whatsapp_clean_text(self._resolve_fallback_tool_reply(last_tool_results))
             final_text = self._maybe_append_advisory_disclaimer(user_message, final_text)
-            return sanitize_whatsapp_clean_text(final_text)
-        return sanitize_whatsapp_clean_text(self._resolve_fallback_tool_reply(last_tool_results))
+            return sanitize_whatsapp_clean_text(verify_and_reconcile_financial_totals(final_text))
+        fallback = self._resolve_fallback_tool_reply(last_tool_results)
+        return sanitize_whatsapp_clean_text(verify_and_reconcile_financial_totals(fallback))
 
     def _maybe_append_advisory_disclaimer(self, user_message: str, reply: str) -> str:
         """
