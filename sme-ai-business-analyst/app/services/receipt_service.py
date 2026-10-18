@@ -35,18 +35,86 @@ class ReceiptService:
         business_id: UUID,
         transaction_id: UUID | None = None,
         member_id: UUID | None = None,
+        confirmation_id: UUID | None = None,
+        transaction_ids: list[UUID] | None = None,
     ) -> tuple[bytes, str, Transaction]:
         """
-        Builds the PDF document for a confirmed sale transaction.
+        Builds the PDF document for a confirmed sale transaction or multi-item sale batch.
+        Supports 1 to 100+ items dynamically with repeating table headers and clean pagination.
         Returns:
             (pdf_bytes, filename, transaction)
         """
-        # 1. Fetch transaction strictly scoped to business_id
-        if transaction_id:
+        # 1. Fetch transactions strictly scoped to business_id (supporting single or multi-item batches)
+        transactions: list[Transaction] = []
+
+        if transaction_ids:
+            t_stmt = (
+                select(Transaction)
+                .where(
+                    Transaction.id.in_(transaction_ids),
+                    Transaction.business_id == business_id,
+                )
+                .order_by(Transaction.occurred_at.asc(), Transaction.created_at.asc())
+            )
+            t_res = await db.execute(t_stmt)
+            transactions = list(t_res.scalars().all())
+
+        elif confirmation_id:
+            t_stmt = (
+                select(Transaction)
+                .where(
+                    Transaction.business_id == business_id,
+                    Transaction.status == "confirmed",
+                    (Transaction.confirmation_id == confirmation_id)
+                    | (
+                        Transaction.ai_extraction_id
+                        == select(Confirmation.ai_extraction_id)
+                        .where(Confirmation.id == confirmation_id)
+                        .scalar_subquery()
+                    ),
+                )
+                .order_by(Transaction.occurred_at.asc(), Transaction.created_at.asc())
+            )
+            t_res = await db.execute(t_stmt)
+            transactions = list(t_res.scalars().all())
+
+        elif transaction_id:
             tx_stmt = select(Transaction).where(
                 Transaction.id == transaction_id,
                 Transaction.business_id == business_id,
             )
+            tx_res = await db.execute(tx_stmt)
+            primary_tx = tx_res.scalar_one_or_none()
+            if primary_tx:
+                # Check if this transaction belongs to a multi-item batch via ai_extraction_id or confirmation_id
+                if primary_tx.ai_extraction_id:
+                    sib_stmt = (
+                        select(Transaction)
+                        .where(
+                            Transaction.business_id == business_id,
+                            Transaction.ai_extraction_id == primary_tx.ai_extraction_id,
+                            Transaction.status == "confirmed",
+                        )
+                        .order_by(Transaction.occurred_at.asc(), Transaction.created_at.asc())
+                    )
+                    sib_res = await db.execute(sib_stmt)
+                    transactions = list(sib_res.scalars().all())
+                elif primary_tx.confirmation_id:
+                    sib_stmt = (
+                        select(Transaction)
+                        .where(
+                            Transaction.business_id == business_id,
+                            Transaction.confirmation_id == primary_tx.confirmation_id,
+                            Transaction.status == "confirmed",
+                        )
+                        .order_by(Transaction.occurred_at.asc(), Transaction.created_at.asc())
+                    )
+                    sib_res = await db.execute(sib_stmt)
+                    transactions = list(sib_res.scalars().all())
+
+                if not transactions:
+                    transactions = [primary_tx]
+
         elif member_id:
             # Pick latest confirmed sale recorded by this specific member
             tx_stmt = (
@@ -57,11 +125,29 @@ class ReceiptService:
                     Transaction.transaction_type == "sale",
                     Transaction.status == "confirmed",
                 )
-                .order_by(Transaction.occurred_at.desc())
+                .order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc())
                 .limit(1)
             )
+            tx_res = await db.execute(tx_stmt)
+            primary_tx = tx_res.scalar_one_or_none()
+            if primary_tx:
+                if primary_tx.ai_extraction_id:
+                    sib_stmt = (
+                        select(Transaction)
+                        .where(
+                            Transaction.business_id == business_id,
+                            Transaction.ai_extraction_id == primary_tx.ai_extraction_id,
+                            Transaction.status == "confirmed",
+                        )
+                        .order_by(Transaction.occurred_at.asc(), Transaction.created_at.asc())
+                    )
+                    sib_res = await db.execute(sib_stmt)
+                    transactions = list(sib_res.scalars().all())
+                if not transactions:
+                    transactions = [primary_tx]
+
         else:
-            # Pick latest confirmed sale
+            # Pick latest confirmed sale and all its sibling items
             tx_stmt = (
                 select(Transaction)
                 .where(
@@ -69,14 +155,31 @@ class ReceiptService:
                     Transaction.transaction_type == "sale",
                     Transaction.status == "confirmed",
                 )
-                .order_by(Transaction.occurred_at.desc())
+                .order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc())
                 .limit(1)
             )
+            tx_res = await db.execute(tx_stmt)
+            primary_tx = tx_res.scalar_one_or_none()
+            if primary_tx:
+                if primary_tx.ai_extraction_id:
+                    sib_stmt = (
+                        select(Transaction)
+                        .where(
+                            Transaction.business_id == business_id,
+                            Transaction.ai_extraction_id == primary_tx.ai_extraction_id,
+                            Transaction.status == "confirmed",
+                        )
+                        .order_by(Transaction.occurred_at.asc(), Transaction.created_at.asc())
+                    )
+                    sib_res = await db.execute(sib_stmt)
+                    transactions = list(sib_res.scalars().all())
+                if not transactions:
+                    transactions = [primary_tx]
 
-        tx_res = await db.execute(tx_stmt)
-        transaction = tx_res.scalar_one_or_none()
-        if not transaction:
+        if not transactions:
             raise ValueError(f"No confirmed sale found for business {business_id}")
+
+        transaction = transactions[0]
 
         # 2. Fetch business details and persistent receipt template (if configured)
         from app.models.receipt_template import ReceiptTemplate
@@ -93,41 +196,52 @@ class ReceiptService:
         payment_terms = template.payment_terms_note if template else None
         footer_note = template.footer_note if template else None
 
-        # 3. Fetch customer details if associated
+        # 3. Fetch customer details if associated with any transaction in the batch
         customer = None
-        if transaction.customer_id:
-            cust_stmt = select(Customer).where(
-                Customer.id == transaction.customer_id,
-                Customer.business_id == business_id,
-            )
-            cust_res = await db.execute(cust_stmt)
-            customer = cust_res.scalar_one_or_none()
+        for tx in transactions:
+            if tx.customer_id:
+                cust_stmt = select(Customer).where(
+                    Customer.id == tx.customer_id,
+                    Customer.business_id == business_id,
+                )
+                cust_res = await db.execute(cust_stmt)
+                customer = cust_res.scalar_one_or_none()
+                if customer:
+                    break
 
         # 4. Fetch debt details if this is a credit sale
         debt = None
-        if transaction.is_credit:
-            debt_stmt = select(Debt).where(
-                Debt.transaction_id == transaction.id,
-                Debt.business_id == business_id,
-            )
-            debt_res = await db.execute(debt_stmt)
-            debt = debt_res.scalar_one_or_none()
+        is_credit = any(bool(t.is_credit) for t in transactions)
+        if is_credit:
+            for tx in transactions:
+                if tx.is_credit:
+                    debt_stmt = select(Debt).where(
+                        Debt.transaction_id == tx.id,
+                        Debt.business_id == business_id,
+                    )
+                    debt_res = await db.execute(debt_stmt)
+                    debt = debt_res.scalar_one_or_none()
+                    if debt:
+                        break
 
         # 5. Fetch staff member who served the customer (if recorded by a member)
         staff_member = None
-        if transaction.created_by_member_id:
-            from app.models.member import Member
-            staff_stmt = select(Member).where(
-                Member.id == transaction.created_by_member_id,
-                Member.business_id == business_id,
-            )
-            staff_res = await db.execute(staff_stmt)
-            staff_member = staff_res.scalar_one_or_none()
+        for tx in transactions:
+            if tx.created_by_member_id:
+                from app.models.member import Member
+                staff_stmt = select(Member).where(
+                    Member.id == tx.created_by_member_id,
+                    Member.business_id == business_id,
+                )
+                staff_res = await db.execute(staff_stmt)
+                staff_member = staff_res.scalar_one_or_none()
+                if staff_member:
+                    break
 
         # 6. Build PDF in memory
-        is_credit = bool(transaction.is_credit)
         doc_type = "INVOICE" if is_credit else "RECEIPT"
-        short_id = str(transaction.id).replace("-", "")[:8].upper()
+        ref_id = transaction.confirmation_id or transaction.ai_extraction_id or transaction.id
+        short_id = str(ref_id).replace("-", "")[:8].upper()
         doc_number = f"INV-{short_id}" if is_credit else f"REC-{short_id}"
         filename = f"{doc_type.lower()}_{short_id}.pdf"
 
@@ -377,60 +491,72 @@ class ReceiptService:
         elements.append(status_box)
         elements.append(Spacer(1, 16))
 
-        # --- Items & Calculations Table ---
-        item_title = transaction.item_name or transaction.description or "General Sale"
-        qty_str = (
-            f"{transaction.quantity:g} {transaction.unit or ''}".strip()
-            if transaction.quantity is not None
-            else "1"
-        )
-        unit_price_val = transaction.unit_price
-        if unit_price_val is None and transaction.quantity and transaction.amount:
-            try:
-                unit_price_val = transaction.amount / transaction.quantity
-            except Exception:
-                unit_price_val = None
-
-        unit_price_str = f"NGN {unit_price_val:,.2f}" if unit_price_val else "-"
-        total_amount = transaction.amount or Decimal("0.00")
+        # --- Items & Calculations Table (Supports 1 to 100+ items dynamically) ---
+        total_amount = sum((t.amount or Decimal("0.00")) for t in transactions)
         total_str = f"NGN {total_amount:,.2f}"
 
         items_table_data = [
             [
+                Paragraph("<b>#</b>", table_head_style),
                 Paragraph("<b>Item / Description</b>", table_head_style),
                 Paragraph("<b>Qty</b>", table_head_style),
                 Paragraph("<b>Unit Price</b>", table_num_cell),
                 Paragraph("<b>Total Amount</b>", table_num_cell),
-            ],
-            [
+            ]
+        ]
+
+        for idx, tx in enumerate(transactions, 1):
+            item_title = tx.item_name or tx.description or f"Item {idx}"
+            qty_str = (
+                f"{tx.quantity:g} {tx.unit or ''}".strip()
+                if tx.quantity is not None
+                else "1"
+            )
+            unit_price_val = tx.unit_price
+            if unit_price_val is None and tx.quantity and tx.amount:
+                try:
+                    unit_price_val = tx.amount / tx.quantity
+                except Exception:
+                    unit_price_val = None
+
+            unit_price_str = f"NGN {unit_price_val:,.2f}" if unit_price_val is not None else "-"
+            item_amt = tx.amount or Decimal("0.00")
+            item_amt_str = f"NGN {item_amt:,.2f}"
+
+            items_table_data.append([
+                Paragraph(str(idx), table_cell_style),
                 Paragraph(item_title, table_cell_style),
                 Paragraph(qty_str, table_cell_style),
                 Paragraph(unit_price_str, table_num_cell),
-                Paragraph(total_str, table_num_cell),
-            ],
-            # Summary rows
-            [
-                "",
-                "",
-                Paragraph("<b>Subtotal:</b>", table_num_cell),
-                Paragraph(total_str, table_num_cell),
-            ],
-            [
-                "",
-                "",
-                Paragraph("<b>Grand Total:</b>", table_num_cell),
-                Paragraph(f"<b>{total_str}</b>", table_num_cell),
-            ],
-        ]
+                Paragraph(item_amt_str, table_num_cell),
+            ])
+
+        # Summary rows
+        items_table_data.append([
+            "",
+            "",
+            "",
+            Paragraph("<b>Subtotal:</b>", table_num_cell),
+            Paragraph(total_str, table_num_cell),
+        ])
+        items_table_data.append([
+            "",
+            "",
+            "",
+            Paragraph("<b>Grand Total:</b>", table_num_cell),
+            Paragraph(f"<b>{total_str}</b>", table_num_cell),
+        ])
 
         if is_credit:
             items_table_data.append([
+                "",
                 "",
                 "",
                 Paragraph("<b>Amount Paid:</b>", table_num_cell),
                 Paragraph("NGN 0.00", table_num_cell),
             ])
             items_table_data.append([
+                "",
                 "",
                 "",
                 Paragraph("<b>Amount Due:</b>", table_num_cell),
@@ -440,31 +566,47 @@ class ReceiptService:
             items_table_data.append([
                 "",
                 "",
+                "",
                 Paragraph("<b>Amount Paid:</b>", table_num_cell),
                 Paragraph(total_str, table_num_cell),
             ])
             items_table_data.append([
                 "",
                 "",
+                "",
                 Paragraph("<b>Balance Due:</b>", table_num_cell),
                 Paragraph("NGN 0.00", table_num_cell),
             ])
 
-        items_table = Table(items_table_data, colWidths=[250, 60, 115, 115])
-        items_table.setStyle(
-            TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f3f4f6")),
-                ("LINEBELOW", (0, 0), (-1, 0), 1.5, colors.HexColor("#9ca3af")),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
-                ("TOPPADDING", (0, 0), (-1, 0), 6),
-                ("BOTTOMPADDING", (0, 1), (-1, 1), 8),
-                ("TOPPADDING", (0, 1), (-1, 1), 8),
-                ("LINEBELOW", (0, 1), (-1, 1), 0.5, colors.HexColor("#e5e7eb")),
-                ("TOPPADDING", (0, 2), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 2), (-1, -1), 4),
-                ("LINEABOVE", (2, 3), (3, 3), 1, colors.HexColor("#9ca3af")),
-            ])
+        n_items = len(transactions)
+        items_table = Table(
+            items_table_data,
+            colWidths=[24, 236, 60, 110, 110],
+            repeatRows=1,
         )
+
+        t_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f3f4f6")),
+            ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.HexColor("#9ca3af")),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 5),
+            ("TOPPADDING", (0, 0), (-1, 0), 5),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]
+
+        for r in range(1, n_items + 1):
+            bg = colors.HexColor("#f9fafb") if r % 2 == 0 else colors.white
+            t_style.append(("BACKGROUND", (0, r), (-1, r), bg))
+            t_style.append(("TOPPADDING", (0, r), (-1, r), 4))
+            t_style.append(("BOTTOMPADDING", (0, r), (-1, r), 4))
+            t_style.append(("LINEBELOW", (0, r), (-1, r), 0.5, colors.HexColor("#e5e7eb")))
+
+        summary_start = n_items + 1
+        t_style.append(("TOPPADDING", (0, summary_start), (-1, -1), 3))
+        t_style.append(("BOTTOMPADDING", (0, summary_start), (-1, -1), 3))
+        gt_row = summary_start + 1
+        t_style.append(("LINEABOVE", (3, gt_row), (4, gt_row), 1, colors.HexColor("#9ca3af")))
+
+        items_table.setStyle(TableStyle(t_style))
         elements.append(items_table)
         elements.append(Spacer(1, 16))
 
@@ -512,7 +654,14 @@ class ReceiptService:
         )
         elements.append(Paragraph(footer_link, footer_style))
 
-        doc.build(elements)
+        def add_page_number(canvas, doc_obj):
+            canvas.saveState()
+            canvas.setFont("Helvetica", 8)
+            canvas.setFillColor(colors.HexColor("#6b7280"))
+            canvas.drawString(36, 18, f"Page {doc_obj.page} • Verified by Waasz AI")
+            canvas.restoreState()
+
+        doc.build(elements, onFirstPage=add_page_number, onLaterPages=add_page_number)
         pdf_bytes = buffer.getvalue()
         buffer.close()
 

@@ -315,11 +315,46 @@ class GetTeamPerformanceInput(BaseModel):
     period: str = Field(default="this_week", description="Timeframe: 'today', 'this_week', 'this_month', or 'all'")
 
 
+class GetRecentTransactionsInput(BaseModel):
+    """Retrieve recent confirmed transactions (sales or expenses) from the ledger to view amounts, items, quantities, dates, and payment methods. Use when the user asks what they sold, recent expenses, or needs to look up a past transaction."""
+    model_config = {"title": "get_recent_transactions"}
+    limit: int = Field(default=10, description="Number of recent records to retrieve (default: 10, max: 50)")
+    record_type: str | None = Field(default=None, description="Filter by type: 'sale', 'expense', or None for both")
+    days: int = Field(default=7, description="Number of past days to look back (default: 7)")
+
+
+class UpdateTransactionInput(BaseModel):
+    """Update or correct a previously confirmed transaction (e.g. changing the amount, item name, quantity, or unit price when the user says 'I made a mistake, that ball joint was 15k not 12k' or 'Change price of brake pad'). Business owners can edit anytime; staff can edit within 15 minutes."""
+    model_config = {"title": "update_transaction"}
+    identifier: str | None = Field(default=None, description="Item name, transaction ID, or original amount to identify which transaction to edit. If omitted, targets the latest transaction.")
+    new_amount: float | None = Field(default=None, description="New correct total amount in Naira (NGN), e.g. 15000")
+    new_item_name: str | None = Field(default=None, description="New correct product or expense name")
+    new_quantity: float | None = Field(default=None, description="New quantity, e.g. 2")
+    new_unit_price: float | None = Field(default=None, description="New unit price in Naira")
+
+
+class GetBatchItemsInput(BaseModel):
+    """Retrieve and inspect all items in a multi-item batch from a paper list, invoice, or receipt (from 2 up to 100 items). Displays itemized products, quantities, prices, and grand total."""
+    model_config = {"title": "get_batch_items"}
+    transaction_id: str | None = Field(default=None, description="Optional transaction UUID from the batch. If omitted, uses the latest sale batch.")
+
+
+class GetInventoryStatusInput(BaseModel):
+    """Inspect current stock levels, quantities on hand, unit costs (COGS), and low-stock reorder thresholds across inventory items."""
+    model_config = {"title": "get_inventory_status"}
+    search_query: str | None = Field(default=None, description="Optional product name or keyword to filter by (e.g. 'rice', 'spark plug'). If omitted, lists all tracked inventory.")
+    low_stock_only: bool = Field(default=False, description="Set to True to filter only items at or below their reorder threshold.")
+
+
 def get_agent_tools() -> list[type[BaseModel]]:
     """Return active agent tools, conditionally omitting image generation tools if disabled."""
     tools: list[type[BaseModel]] = [
         RecordTransactionInput,
         RecordBatchTransactionsInput,
+        GetRecentTransactionsInput,
+        UpdateTransactionInput,
+        GetBatchItemsInput,
+        GetInventoryStatusInput,
         SetItemCostInput,
         SetReorderThresholdInput,
         CorrectStockLevelInput,
@@ -452,6 +487,10 @@ class AgentService:
 
         return (
             "You are Waasz (Waasz AI), an intelligent AI business analyst and financial copilot built specifically for African SMEs and business owners.\n"
+            "### STRICT LANGUAGE CONSTRAINTS:\n"
+            "- You must ONLY communicate in English or Nigerian Pidgin as appropriate for the user.\n"
+            "- You must NEVER, under any circumstances, output text in Turkish, German, French, Spanish, Arabic, Hindi, or any other foreign language.\n"
+            "- Even when encountering errors, corrections, or confused user inputs, always maintain clean, professional, friendly English or Nigerian Pidgin.\n\n"
             "### ORIGIN & ENGINEERING ARCHITECTURE:\n"
             "- CREATOR & IDENTITY: You are Waasz AI, created, engineered, and maintained by the Waasz engineering team. NEVER claim to be built by OpenAI, never claim to be ChatGPT, and never say you are an OpenAI model. If asked who built you, state proudly that you were developed by the Waasz engineering team.\n"
             "- ARCHITECTURE: You were custom-engineered and written from the ground up in production Python and PostgreSQL with specialized financial ledger double-entry bookkeeping, automated inventory controls, OCR receipt scanning, and real-time business analytics. You were carefully written and architected by software engineers, NOT vibecoded or generated at random.\n"
@@ -480,6 +519,7 @@ class AgentService:
             "    - If the page header is 'SINGLE CASH', 'CASH SALES', 'DAILY SALES', 'SALES RECORD', or if the user caption says 'Sales made' or lists goods sold, set record_type='sale'.\n"
             "    - Only set record_type='expense' if the document explicitly says 'Expenses', 'Purchases', 'Bills', or user says 'Expenses made'.\n"
             "  * ALWAYS call the `record_batch_transactions` tool with all line items in the list.\n"
+            "  * Batch receipts support from 1 to 100+ items with complete itemized breakdown and repeating page headers.\n"
             "- SINGLE-ITEM RECEIPT / EXPENSE: When the photo or message contains only 1 single good or expense, call `record_transaction` with the specific item name, amount, and occurred_at_date if written.\n"
             "- GENERAL PHOTO / SCENE / OBJECT: When the user sends any general photo, scene, or object, describe it conversationally using multimodal vision.\n\n"
             "### TOOL EXECUTION & OUTCOME ACCURACY RULES:\n"
@@ -497,17 +537,21 @@ class AgentService:
             "### AUTHORITATIVE TOOL CAPABILITIES:\n"
             "1. Reminders & Alarms: Schedule reminders with `create_reminder`. Use ONLY when the user provides an unambiguous, specific time. For vague phrases like 'later today' or 'soon', DO NOT call `create_reminder` — ask: 'What time works for you?'\n"
             "2. Sales & Expenses: For single items, stage using `record_transaction`. For multiple items from a handwritten list, paper sheet, or receipt (up to 100 items), ALWAYS use `record_batch_transactions` so each item is stored distinctly.\n"
-            "3. Instant PDF Receipts & Invoices: Generate official PDF receipts/invoices directly to WhatsApp using `generate_receipt`. When a user requests a receipt for a transaction (e.g. 'I need a receipt for 10 books at 3000 each'): stage the sale with `record_transaction` including customer_name if specified. If customer name was not specified, you may ask who to bill or bill to 'Walk-in Customer'. When a user provides business branding or profile details (e.g. 'my business name is...', 'set business name to...', 'set address to...', 'my shop address is...'), immediately save it with `set_receipt_template` or `update_receipt_template` so their official name, address, and contact details appear on all future receipts. Users can also send their store logo photo in chat with caption 'Set logo'.\n"
+            "3. Instant PDF Receipts & Invoices: Generate official PDF receipts/invoices directly to WhatsApp using `generate_receipt`. Receipts support 1 to 100+ items automatically. When a user requests a receipt for a transaction: stage the sale with `record_transaction` including customer_name if specified. Save business profile details with `set_receipt_template` or `update_receipt_template`.\n"
             "4. Debt Tracking: Track customer credit sales, list debtors with `list_outstanding_debts`, mark debts as paid with `mark_debt_paid`, and draft customer payment reminders for the owner with `draft_payment_reminder`.\n"
-            "5. Low-Stock Alerts & Inventory: Track inventory quantities and set reorder threshold alerts using `set_reorder_threshold`. If the user specifies BOTH a threshold and their current stock level in the same message (e.g. 'Alert me when my rice stock reduces to 15 bags, I currently have 20 bags'), capture both in `set_reorder_threshold` (`threshold=15`, `current_quantity=20`). Correct or update actual physical counts directly without requiring unit cost using `correct_stock_level`.\n"
+            "5. Low-Stock Alerts & Inventory: Track inventory quantities and set reorder threshold alerts using `set_reorder_threshold`. If the user specifies BOTH a threshold and their current stock level in the same message, capture both. Check inventory levels and low-stock alerts with `get_inventory_status`. Correct or update actual physical counts directly without requiring unit cost using `correct_stock_level`.\n"
             "6. Unit Cost & Profit Margins: Set item cost price (COGS) with `set_item_cost`, audit profit margins with `get_margin_report`, 80/20 Pareto with `get_product_performance_analysis`, and simulate pricing with `simulate_pricing`.\n"
             "7. Cash Flow Forecasting: Log upcoming supplier payables using `log_upcoming_payable` and predict shortfalls using `get_cash_flow_forecast`.\n"
-            "8. Reports, Visual Charts & Live Dashboard: Generate summary text reports using `generate_report`. When the user asks to see their financial chart, trend graph, or performance chart (e.g. 'show me my financial chart', 'I meant for this chart', 'send financial graph', 'chart dashboard'), ALWAYS call `generate_financial_chart` to generate and deliver the visual chart image along with their live interactive dashboard link. You CAN and DO generate visual financial charts on demand. NEVER tell the user you cannot generate visual charts or graphs. Save durable notes/price lists with `store_knowledge_document`.\n"
+            "8. Reports, Visual Charts & Live Dashboard: Generate summary text reports using `generate_report`. When the user asks to see their financial chart, trend graph, or performance chart, ALWAYS call `generate_financial_chart`. Save durable notes/price lists with `store_knowledge_document`.\n"
             "9. Live/Current Information: Retrieve real-time facts, currency exchange rates, or news using `get_current_information`.\n"
             "10. Creative Image Generation vs Charts: You CANNOT generate artistic/illustrative photos or creative drawings (reply 'I can't generate creative images right now' if asked to draw art). However, business financial charts and graphs ARE fully supported via `generate_financial_chart`.\n"
-            "11. Multi-Staff Team Management & Analytics (Owner Only): As a business owner, you can view team sales and staff contribution breakdown with `get_team_performance(period)`. You can invite new staff members with `invite_staff_member(display_name, phone_number)`, view current team members with `list_staff_members()`, and remove staff members with `remove_staff_member(identifier)`. Staff members do NOT have permission to invite, list, or remove team members, nor view team performance.\n"
-            "12. Voiding Transactions & 15-Minute Window: Cancel or void accidental entries with `void_transaction(reason, identifier)`. Staff members can only void their own entries within 15 minutes of occurrence; after 15 minutes, instruct them to ask the business owner. Owners can void any transaction at any time. Voiding automatically reverses inventory deductions and cancels linked debts.\n"
-            "13. Expense Approval Threshold (Owner Only): Owners can configure an expense approval threshold with `set_expense_approval_threshold(threshold_amount)`. When staff members log expenses at or above this threshold, the owner is automatically alerted via WhatsApp.\n\n"
+            "11. Multi-Staff Team Management & Analytics (Owner Only): View team sales and staff contribution breakdown with `get_team_performance(period)`. Invite new staff members with `invite_staff_member(display_name, phone_number)`, view current team members with `list_staff_members()`, and remove staff members with `remove_staff_member(identifier)`.\n"
+            "12. Voiding Transactions & 15-Minute Window: Cancel or void accidental entries with `void_transaction(reason, identifier)`. Staff members can only void their own entries within 15 minutes of occurrence; owners can void anytime.\n"
+            "13. Expense Approval Threshold (Owner Only): Owners can configure an expense approval threshold with `set_expense_approval_threshold(threshold_amount)`.\n"
+            "14. Transaction Ledger Inspection (`get_recent_transactions`): View recent confirmed sales or expenses, item names, quantities, amounts, dates, and payment methods.\n"
+            "15. Transaction Editing (`update_transaction`): When the user says they made a mistake in an earlier sale or expense (e.g. 'Ball joint was 15k not 12k', 'Change price of brake pad to 25000', 'Qty was 2 not 1'), use `update_transaction` to correct the record in the ledger immediately.\n"
+            "16. Inspecting Multi-Item Batches (`get_batch_items`): When the user asks about the items in a batch or receipt, view all itemized line items, unit prices, and grand total with `get_batch_items`.\n"
+            "17. Inventory Status Inspection (`get_inventory_status`): View stock on hand, COGS, and reorder levels for any product or low-stock items.\n\n"
             "### DATA PERMANENCE, CONTINUITY & SECURITY RULES:\n"
             "- All business records are permanently stored in our secure encrypted cloud database tied to the user's registered phone number.\n"
             "- Changing phone numbers strictly requires admin-assisted account recovery.\n"
@@ -1881,6 +1925,239 @@ class AgentService:
                     return res.get("message", "Expense approval threshold updated."), False
                 else:
                     return f"Error: {res.get('error', 'Could not set expense threshold.')}", False
+
+            elif tool_name == "get_recent_transactions":
+                limit_val = min(int(tool_args.get("limit") or 10), 50)
+                rec_type = tool_args.get("record_type")
+                days_back = int(tool_args.get("days") or 7)
+                since_dt = datetime.now(UTC) - timedelta(days=days_back)
+
+                tx_stmt = select(Transaction).where(
+                    Transaction.business_id == business.id,
+                    Transaction.status == "confirmed",
+                    Transaction.occurred_at >= since_dt,
+                )
+                if actor and actor.role == "staff":
+                    tx_stmt = tx_stmt.where(Transaction.created_by_member_id == actor.member_id)
+                if rec_type in {"sale", "expense"}:
+                    tx_stmt = tx_stmt.where(Transaction.transaction_type == rec_type)
+
+                tx_stmt = tx_stmt.order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc()).limit(limit_val)
+                tx_rows = (await db.execute(tx_stmt)).scalars().all()
+
+                if not tx_rows:
+                    type_str = f" {rec_type}s" if rec_type else " transactions"
+                    return f"No confirmed{type_str} found in the last {days_back} days.", False
+
+                lines = [f"Recent Confirmed Transactions (Past {days_back} days, showing {len(tx_rows)}):"]
+                for t in tx_rows:
+                    dt_str = t.occurred_at.strftime("%d %b %H:%M") if t.occurred_at else "-"
+                    t_type = "SALE" if t.transaction_type == "sale" else "EXPENSE"
+                    item_str = t.item_name or t.description or "General"
+                    qty_str = f" ({t.quantity:g} {t.unit or ''})".strip() if t.quantity else ""
+                    amt_str = f"₦{t.amount:,.2f}" if t.amount else "₦0.00"
+                    method_str = " [Credit]" if t.is_credit else ""
+                    lines.append(f"• {dt_str} | {t_type}: {item_str}{qty_str} - {amt_str}{method_str}")
+                return "\n".join(lines), False
+
+            elif tool_name == "update_transaction":
+                identifier = tool_args.get("identifier")
+                new_amt = tool_args.get("new_amount")
+                new_name = tool_args.get("new_item_name")
+                new_qty = tool_args.get("new_quantity")
+                new_up = tool_args.get("new_unit_price")
+
+                target_tx = None
+                if identifier:
+                    try:
+                        tx_uuid = UUID(str(identifier).strip())
+                        tx_res = await db.execute(
+                            select(Transaction).where(
+                                Transaction.id == tx_uuid,
+                                Transaction.business_id == business.id,
+                                Transaction.status == "confirmed",
+                            )
+                        )
+                        target_tx = tx_res.scalar_one_or_none()
+                    except Exception:
+                        # Match by item_name or amount
+                        id_str = str(identifier).strip().lower()
+                        tx_stmt = (
+                            select(Transaction)
+                            .where(
+                                Transaction.business_id == business.id,
+                                Transaction.status == "confirmed",
+                            )
+                            .order_by(Transaction.occurred_at.desc())
+                        )
+                        all_txs = (await db.execute(tx_stmt)).scalars().all()
+                        for cand in all_txs:
+                            cand_name = (cand.item_name or cand.description or "").lower()
+                            if id_str in cand_name:
+                                target_tx = cand
+                                break
+                            try:
+                                if Decimal(id_str) == cand.amount:
+                                    target_tx = cand
+                                    break
+                            except Exception:
+                                pass
+
+                if not target_tx:
+                    # Pick latest confirmed transaction
+                    tx_stmt = (
+                        select(Transaction)
+                        .where(
+                            Transaction.business_id == business.id,
+                            Transaction.status == "confirmed",
+                        )
+                    )
+                    if actor and actor.role == "staff":
+                        tx_stmt = tx_stmt.where(Transaction.created_by_member_id == actor.member_id)
+                    tx_stmt = tx_stmt.order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc()).limit(1)
+                    tx_res = await db.execute(tx_stmt)
+                    target_tx = tx_res.scalar_one_or_none()
+
+                if not target_tx:
+                    return "Error: No confirmed transaction found to update.", False
+
+                # Staff 15-minute grace window check
+                now = datetime.now(UTC)
+                if actor and actor.role == "staff":
+                    if target_tx.created_by_member_id and target_tx.created_by_member_id != actor.member_id:
+                        return "Error: Permission Denied: Staff members can only edit entries they recorded.", False
+                    tx_time = target_tx.occurred_at if target_tx.occurred_at.tzinfo else target_tx.occurred_at.replace(tzinfo=UTC)
+                    if (now - tx_time) > timedelta(minutes=15):
+                        return "Error: Correction window closed (15 minutes). Please ask your business owner to adjust this transaction.", False
+
+                changes = []
+                if new_amt is not None:
+                    old_amt = target_tx.amount
+                    target_tx.amount = Decimal(str(new_amt))
+                    changes.append(f"Amount updated from ₦{old_amt:,.2f} to ₦{target_tx.amount:,.2f}")
+                if new_name is not None and new_name.strip():
+                    old_name = target_tx.item_name or target_tx.description or "item"
+                    target_tx.item_name = new_name.strip()
+                    changes.append(f"Item name updated from '{old_name}' to '{target_tx.item_name}'")
+                if new_qty is not None:
+                    target_tx.quantity = Decimal(str(new_qty))
+                    changes.append(f"Quantity updated to {target_tx.quantity:g}")
+                if new_up is not None:
+                    target_tx.unit_price = Decimal(str(new_up))
+                    changes.append(f"Unit price updated to ₦{target_tx.unit_price:,.2f}")
+
+                if not changes:
+                    return "Notice: No new details were provided to update.", False
+
+                target_tx.updated_at = now
+                await db.flush()
+
+                # Audit log
+                await self.ledger.record_audit_log(
+                    db=db,
+                    business_id=business.id,
+                    action="transaction_updated",
+                    member_id=actor.member_id if actor else None,
+                    entity_type="transaction",
+                    entity_id=target_tx.id,
+                    metadata={"changes": changes},
+                )
+                return f"Success: Transaction updated ({'; '.join(changes)}).", False
+
+            elif tool_name == "get_batch_items":
+                tx_id_str = tool_args.get("transaction_id")
+                target_tx = None
+                if tx_id_str:
+                    try:
+                        tx_res = await db.execute(
+                            select(Transaction).where(
+                                Transaction.id == UUID(tx_id_str),
+                                Transaction.business_id == business.id,
+                            )
+                        )
+                        target_tx = tx_res.scalar_one_or_none()
+                    except Exception:
+                        pass
+                if not target_tx:
+                    # Pick latest confirmed sale
+                    tx_stmt = (
+                        select(Transaction)
+                        .where(
+                            Transaction.business_id == business.id,
+                            Transaction.transaction_type == "sale",
+                            Transaction.status == "confirmed",
+                        )
+                        .order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc())
+                        .limit(1)
+                    )
+                    tx_res = await db.execute(tx_stmt)
+                    target_tx = tx_res.scalar_one_or_none()
+
+                if not target_tx:
+                    return "Error: No sale transaction found to inspect.", False
+
+                batch_items = []
+                if target_tx.ai_extraction_id:
+                    sib_res = await db.execute(
+                        select(Transaction).where(
+                            Transaction.business_id == business.id,
+                            Transaction.ai_extraction_id == target_tx.ai_extraction_id,
+                            Transaction.status == "confirmed",
+                        ).order_by(Transaction.occurred_at.asc(), Transaction.created_at.asc())
+                    )
+                    batch_items = list(sib_res.scalars().all())
+                elif target_tx.confirmation_id:
+                    sib_res = await db.execute(
+                        select(Transaction).where(
+                            Transaction.business_id == business.id,
+                            Transaction.confirmation_id == target_tx.confirmation_id,
+                            Transaction.status == "confirmed",
+                        ).order_by(Transaction.occurred_at.asc(), Transaction.created_at.asc())
+                    )
+                    batch_items = list(sib_res.scalars().all())
+
+                if not batch_items:
+                    batch_items = [target_tx]
+
+                total_amt = sum((t.amount or Decimal("0")) for t in batch_items)
+                lines = [f"Batch Items Breakdown ({len(batch_items)} items, Total: ₦{total_amt:,.2f}):"]
+                for idx, it in enumerate(batch_items, 1):
+                    item_name = it.item_name or it.description or f"Item {idx}"
+                    qty = f"{it.quantity:g} {it.unit or ''}".strip() if it.quantity else "1"
+                    amt = f"₦{it.amount:,.2f}" if it.amount else "₦0.00"
+                    lines.append(f"{idx}. {item_name} (Qty: {qty}) - {amt}")
+                return "\n".join(lines), False
+
+            elif tool_name == "get_inventory_status":
+                q_text = tool_args.get("search_query")
+                low_only = bool(tool_args.get("low_stock_only"))
+
+                inv_stmt = select(InventoryItem).where(InventoryItem.business_id == business.id)
+                if q_text and q_text.strip():
+                    norm_q = q_text.strip().lower()
+                    inv_stmt = inv_stmt.where(InventoryItem.normalized_item_name.contains(norm_q))
+                inv_stmt = inv_stmt.order_by(InventoryItem.item_name.asc()).limit(50)
+                inv_items = (await db.execute(inv_stmt)).scalars().all()
+
+                if low_only:
+                    inv_items = [
+                        it for it in inv_items
+                        if it.low_stock_threshold is not None and it.quantity_on_hand <= it.low_stock_threshold
+                    ]
+
+                if not inv_items:
+                    filter_note = " low-stock" if low_only else ""
+                    search_note = f" matching '{q_text}'" if q_text else ""
+                    return f"No{filter_note} inventory items found{search_note}.", False
+
+                lines = [f"Inventory Status ({len(inv_items)} tracked items):"]
+                for it in inv_items:
+                    u_str = f" {it.unit}" if it.unit else ""
+                    cost_str = f" | Unit Cost: ₦{it.unit_cost:,.2f}" if it.unit_cost else ""
+                    thresh_str = f" | Reorder at: {it.low_stock_threshold:g}{u_str}" if it.low_stock_threshold is not None else ""
+                    status_flag = " ⚠️ LOW STOCK" if (it.low_stock_threshold is not None and it.quantity_on_hand <= it.low_stock_threshold) else ""
+                    lines.append(f"• {it.item_name}: {it.quantity_on_hand:g}{u_str}{cost_str}{thresh_str}{status_flag}")
+                return "\n".join(lines), False
 
             else:
                 return f"Error: Unknown tool '{tool_name}'.", False
