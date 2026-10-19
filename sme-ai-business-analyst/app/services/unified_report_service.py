@@ -276,29 +276,61 @@ class UnifiedReportService:
             result = await self.whatsapp.send_text(user.phone_number, report_text)
         else:
             # Must use pre-approved Meta utility template outside 24h window
-            template_name = (
-                "weekly_business_report_v1"
-                if user.niche == "sme_owner"
-                else "personal_productivity_summary_v1"
-            )
-            logger.info("User %s is outside 24h window; sending %s template", user_id, template_name)
-            template_components = [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": user.display_name or "there"},
-                        {"type": "text", "text": f"{cadence.capitalize()} Progress"},
-                        {"type": "text", "text": f"{len(curr_acts)} activities logged"},
-                        {"type": "text", "text": f"{settings.app_base_url}/reports"},
-                    ],
-                }
-            ]
-            result = await self.whatsapp.send_template(
-                user.phone_number,
-                template_name=template_name,
-                language_code="en",
-                components=template_components,
-            )
+            if cadence == "daily":
+                # Approved Meta Utility Template for daily reconciliation
+                template_name = "daily_ledger_reconciliation_v1"
+                user_name = user.display_name or "there"
+                date_str = now.strftime("%Y-%m-%d")
+                tx_count_str = str(len(curr_acts))
+                components_3 = [
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": user_name},
+                            {"type": "text", "text": date_str},
+                            {"type": "text", "text": tx_count_str},
+                        ],
+                    }
+                ]
+                logger.info("User %s is outside 24h window; sending utility template %s", user_id, template_name)
+                result = await self.whatsapp.send_template(
+                    user.phone_number,
+                    template_name=template_name,
+                    language_code="en",
+                    components=components_3,
+                )
+                # Resilient fallback if 1 parameter is expected by Meta
+                if not result.success and ("132000" in str(result.error_message) or "parameter" in str(result.error_message).lower()):
+                    result = await self.whatsapp.send_template(
+                        user.phone_number,
+                        template_name=template_name,
+                        language_code="en",
+                        components=[{"type": "body", "parameters": [{"type": "text", "text": user_name}]}],
+                    )
+            else:
+                template_name = (
+                    "weekly_business_report_v1"
+                    if user.niche == "sme_owner"
+                    else "personal_productivity_summary_v1"
+                )
+                logger.info("User %s is outside 24h window; sending %s template", user_id, template_name)
+                template_components = [
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": user.display_name or "there"},
+                            {"type": "text", "text": f"{cadence.capitalize()} Progress"},
+                            {"type": "text", "text": f"{len(curr_acts)} activities logged"},
+                            {"type": "text", "text": f"{settings.app_base_url}/reports"},
+                        ],
+                    }
+                ]
+                result = await self.whatsapp.send_template(
+                    user.phone_number,
+                    template_name=template_name,
+                    language_code="en",
+                    components=template_components,
+                )
 
         if user.business_id:
             await self.ledger.record_outbound_message(

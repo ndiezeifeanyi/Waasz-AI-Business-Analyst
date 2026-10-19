@@ -231,7 +231,13 @@ async def test_batch_unified_reports_dispatch_routing_isolation():
         captured_reports.append((to_phone, body))
         return WhatsAppSendResult(message_id=f"rep_{to_phone[-4:]}_{uuid4().hex[:6]}")
 
+    async def fake_send_template(to_phone: str, template_name: str, language_code: str, components: list):
+        body_summary = " ".join([str(p.get("text", "")) for c in components if c.get("type") == "body" for p in c.get("parameters", [])])
+        captured_reports.append((to_phone, f"Template: {body_summary}"))
+        return WhatsAppSendResult(message_id=f"rep_tmpl_{to_phone[-4:]}_{uuid4().hex[:6]}")
+
     mock_whatsapp.send_text = AsyncMock(side_effect=fake_send_text)
+    mock_whatsapp.send_template = AsyncMock(side_effect=fake_send_template)
 
     unified_svc = UnifiedReportService(whatsapp=mock_whatsapp)
 
