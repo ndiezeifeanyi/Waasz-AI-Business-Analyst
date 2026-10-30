@@ -17,6 +17,7 @@ from app.models.activity import Activity
 from app.models.business import Business
 from app.models.goal import UserGoal
 from app.models.member import Member
+from app.models.message import WhatsAppMessage
 from app.models.user import User
 from app.schemas.actor import ActorContext
 from app.services.analytics_service import AI_ADVISORY_DISCLAIMER, AnalyticsService
@@ -246,6 +247,32 @@ class UnifiedReportService:
             user, cadence, curr_acts, prior_acts, goals, bi_evidence=bi_evidence
         )
 
+        # Attach Waasz Business Credit Score and 30-Day Loan-Readiness Streak
+        if user.business_id and cadence in {"daily", "weekly"}:
+            try:
+                from app.services.credit_score_service import CreditScoreService
+                cs_svc = CreditScoreService()
+                score_data = await cs_svc.calculate_score(db, user.business_id)
+                score_val = score_data.get("credit_score", 650)
+                tier = score_data.get("tier", "Developing")
+                streak = score_data.get("streak_days", 0)
+                days_left = score_data.get("days_to_unlock", max(0, 30 - streak))
+                tier_emoji = "🟢" if score_val >= 650 else ("🟡" if score_val >= 500 else "🔴")
+
+                score_badge = (
+                    f"\n\n🏆 WAASZ CREDIT SCORE & LOAN PROGRESS\n"
+                    f"• Business Credit Score: {score_val}/850 [{tier} {tier_emoji}]\n"
+                    f"• 30-Day Bank Loan Streak: Day {streak} of 30 active\n"
+                )
+                if days_left > 0:
+                    score_badge += f"• ⏳ {days_left} more active logging days to unlock your Certified Bank Loan Profile!\n"
+                else:
+                    score_badge += f"• 🎉 Certified Bank Loan Profile UNLOCKED! Type 'health profile' to download your stamped PDF.\n"
+
+                report_text += score_badge
+            except Exception as cs_err:
+                logger.warning("Failed to attach credit score to report: %s", cs_err)
+
         # Check if weekly report should trigger Week 1 user review check-in
         if cadence == "weekly" and user.business_id:
             try:
@@ -277,8 +304,33 @@ class UnifiedReportService:
         else:
             # Must use pre-approved Meta utility template outside 24h window
             if cadence == "daily":
-                # Approved Meta Utility Template for daily reconciliation
-                template_name = "daily_ledger_reconciliation_v1"
+                # Option 1: Suppress 9pm template if 6pm reconciliation nudge was already sent today
+                # without user reply, to avoid spamming the user with duplicate evening templates.
+                recent_nudge_stmt = (
+                    select(WhatsAppMessage.id)
+                    .where(
+                        WhatsAppMessage.user_id == user.id,
+                        WhatsAppMessage.direction == "outbound",
+                        WhatsAppMessage.created_at >= now - timedelta(hours=8),
+                    )
+                    .filter(
+                        WhatsAppMessage.body.ilike("%reconciliation%")
+                        | WhatsAppMessage.body.ilike("%daily_ledger_reconciliation%")
+                        | WhatsAppMessage.body.ilike("%daily_inactivity_checkin%")
+                    )
+                    .limit(1)
+                )
+                already_nudged = (await db.execute(recent_nudge_stmt)).scalars().first()
+                if already_nudged:
+                    logger.info(
+                        "User %s already received reconciliation nudge today and remains outside 24h window; suppressing duplicate 9pm template",
+                        user_id,
+                    )
+                    return {"status": "skipped", "reason": "suppressed_duplicate_nudge_template"}
+
+                # Option 2: Dedicated Daily Report Template (daily_business_summary_v1)
+                # keeping daily_ledger_reconciliation_v1 strictly for 6pm inactivity nudges.
+                template_name = "daily_business_summary_v1"
                 user_name = user.display_name or "there"
                 date_str = now.strftime("%Y-%m-%d")
                 tx_count_str = str(len(curr_acts))
@@ -299,11 +351,32 @@ class UnifiedReportService:
                     language_code="en",
                     components=components_3,
                 )
-                # Resilient fallback if 1 parameter is expected by Meta
-                if not result.success and ("132000" in str(result.error_message) or "parameter" in str(result.error_message).lower()):
+
+                # Resilient fallback: If daily_business_summary_v1 is not yet active on Meta,
+                # fall back to daily_ledger_reconciliation_v1
+                if not result.success and (
+                    "132001" in str(result.error_message)
+                    or "does not exist" in str(result.error_message).lower()
+                ):
+                    logger.info(
+                        "Template %s not active on Meta; falling back to daily_ledger_reconciliation_v1",
+                        template_name,
+                    )
                     result = await self.whatsapp.send_template(
                         user.phone_number,
-                        template_name=template_name,
+                        template_name="daily_ledger_reconciliation_v1",
+                        language_code="en",
+                        components=components_3,
+                    )
+
+                # Resilient fallback if 1 parameter is expected by Meta
+                if not result.success and (
+                    "132000" in str(result.error_message)
+                    or "parameter" in str(result.error_message).lower()
+                ):
+                    result = await self.whatsapp.send_template(
+                        user.phone_number,
+                        template_name="daily_ledger_reconciliation_v1",
                         language_code="en",
                         components=[{"type": "body", "parameters": [{"type": "text", "text": user_name}]}],
                     )

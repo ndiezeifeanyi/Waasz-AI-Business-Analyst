@@ -15,7 +15,7 @@ from app.services.whatsapp_client import WhatsAppClient
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_NUDGE_TEXT = "Bookkeeping alert: Your daily business ledger is open for reconciliation. Please reply with any sales or expenses recorded today to finalize your closing balance."
+DEFAULT_NUDGE_TEXT = "Hey! 👋 Hope sales went well today. Any more sales or expenses to add before we wrap up today's numbers? 📊 (Or just reply '0' if all done for today!)"
 UTILITY_TEMPLATE_NAME = "daily_ledger_reconciliation_v1"
 FALLBACK_TEMPLATE_NAME = "daily_inactivity_checkin_v1"
 
@@ -142,7 +142,7 @@ class InactivityNudgeService:
         recent_msgs = out_res.scalars().all()
         for msg in recent_msgs:
             body = (msg.body or "").lower()
-            if "didn't hear from you today" in body or "daily_inactivity_checkin" in body or "ledger_reconciliation" in body:
+            if "didn't hear from you today" in body or "daily_inactivity_checkin" in body or "ledger_reconciliation" in body or "hope sales went well" in body:
                 logger.info("User %s was already nudged today; skipping", user.id)
                 return False
 

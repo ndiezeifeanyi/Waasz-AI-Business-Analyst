@@ -335,40 +335,60 @@ class WhatsAppWebhookProcessor:
                 ref_msg = f"\n\n🎁 Your personal referral code: *{ref.code}* (share with up to 5 friends)."
 
             is_invite = bool(getattr(decision, "invite_code", None) or (decision.reason == "invite_code_claimed"))
-            full_welcome = self._build_onboarding_intro_message(invite_verified=is_invite, referral_msg=ref_msg)
 
-            # Check if this initial message contains an actual question or advisory inquiry
             raw_body = (parsed.body or "").strip()
             lower_body = raw_body.lower()
-            is_question = (
-                "?" in raw_body
-                or any(lower_body.startswith(q) for q in (
-                    "how", "what", "why", "who", "when", "where", "can you", "could you", "tell me", "help me", "explain", "is it", "which", "advice", "advise"
-                ))
-                or any(q_word in lower_body for q_word in ("how to", "how do", "can you", "help me", "what is", "how can", "tips on", "advice on", "advise me"))
-                or any(w in lower_body for w in ("develo", "develop", "small scale", "business plan", "grow", "strategy"))
-            ) and not any(lower_body == g for g in ("hi", "hello", "hey", "start", "join", "ok", "yes", "test", "ping"))
+            is_media = bool(parsed.media_id or parsed.media_type)
+            is_transaction = any(kw in lower_body for kw in (
+                "sold", "sale", "bought", "buy", "expense", "paid", "credit", "₦", "naira", "bag", "carton"
+            )) and any(char.isdigit() for char in raw_body)
 
-            if is_question:
-                try:
-                    advice_answer = await self.qa.answer(db, user, raw_body)
-                    full_welcome = (
-                        f"{full_welcome}\n\n"
-                        f"---\n"
-                        f"💡 *In response to your question:*\n"
-                        f"{advice_answer}\n\n"
-                        f"👉 *To set up your shop profile and receipts, what is the name of your shop or business?* (e.g. 'Emeka Stores')"
-                    )
-                except Exception as qa_err:
-                    logger.warning("Failed to generate QA answer on first message: %s", qa_err)
+            # Track interaction count in business settings
+            b_settings = dict(business.settings or {})
+            b_settings["user_interaction_count"] = 1
+            business.settings = b_settings
+            await db.flush()
 
-            send_result = await self.whatsapp.send_text(parsed.from_phone, full_welcome)
-            await self.ledger.record_outbound_message(
-                db, business.id, parsed.from_phone, full_welcome, send_result, user_id=user.id
-            )
-            if hasattr(db, "commit"):
-                await db.commit()
-            return
+            # If brand new user sent a greeting, general chat, or question, handle onboarding hook
+            if not is_media and not is_transaction:
+                is_question = (
+                    "?" in raw_body
+                    or any(lower_body.startswith(q) for q in (
+                        "how", "what", "why", "who", "when", "where", "can you", "could you", "tell me", "help me", "explain", "is it", "which", "advice", "advise"
+                    ))
+                    or any(q_word in lower_body for q_word in ("how to", "how do", "can you", "help me", "what is", "how can", "tips on", "advice on", "advise me"))
+                    or any(w in lower_body for w in ("develo", "develop", "small scale", "business plan", "grow", "strategy"))
+                ) and not any(lower_body == g for g in ("hi", "hello", "hey", "start", "join", "ok", "yes", "test", "ping"))
+
+                if is_question:
+                    try:
+                        advice_answer = await self.qa.answer(db, user, raw_body)
+                        full_welcome = (
+                            f"👋 Hello! Welcome to Waasz.\n\n"
+                            f"💡 *In response to your question:*\n"
+                            f"{advice_answer}\n\n"
+                            f"---\n"
+                            f"🚀 *Try tracking a sale right now in 5 seconds!* Just reply:\n"
+                            f"👉 _'Sold 2 bags of rice ₦70,000'_\n"
+                            f"👉 Or hold the mic and send a quick voice note 🎙️"
+                            f"{ref_msg}"
+                        )
+                    except Exception as qa_err:
+                        logger.warning("Failed to generate QA answer on first message: %s", qa_err)
+                        full_welcome = self._build_onboarding_intro_message(invite_verified=is_invite, referral_msg=ref_msg)
+                else:
+                    full_welcome = self._build_onboarding_intro_message(invite_verified=is_invite, referral_msg=ref_msg)
+
+                send_result = await self.whatsapp.send_text(parsed.from_phone, full_welcome)
+                await self.ledger.record_outbound_message(
+                    db, business.id, parsed.from_phone, full_welcome, send_result, user_id=user.id
+                )
+                if hasattr(db, "commit"):
+                    await db.commit()
+                return
+
+            # If user sent a transaction or media right away, do NOT return early!
+            # Let it fall through so the sale/expense/receipt is processed immediately!
 
         biz_user_res = None
         get_mem_fn = getattr(self.ledger, "get_or_create_business_and_member", None)
@@ -483,15 +503,17 @@ class WhatsAppWebhookProcessor:
                     has_address = bool(tmpl and tmpl.address and tmpl.address.strip())
                     is_profile_incomplete = not (has_custom_name and has_address)
 
-                    if is_profile_incomplete:
+                    b_settings = dict(business.settings or {})
+                    turns = b_settings.get("user_interaction_count", 1)
+                    compliance_shown = b_settings.get("compliance_shown", False)
+
+                    if turns <= 2 and not compliance_shown:
                         msg_body = (
                             f"{handled}\n\n"
-                            "🧾 *Branded Receipt Setup:*\n"
-                            "Your store details (name/address) are not set yet, so your receipt would appear with generic details.\n\n"
-                            "To personalize your receipt, reply with your store details:\n"
-                            "👉 *Store: [Store Name], Address: [Store Address]*\n"
-                            "_(e.g. Store: Lake Toy World, Address: 12 Marina Street, Lagos)_\n\n"
-                            "Or tap below to generate immediately with default details:"
+                            "✨ *See what else you can do right now:*\n"
+                            "👉 Tap below to view your instant PDF receipt 🧾\n"
+                            "👉 Or ask: *'What is my total sales today?'* 📊\n"
+                            "👉 Or track debt: *'Emeka bought 1 shoe ₦15k on credit'* 🤝"
                         )
                     else:
                         msg_body = handled
@@ -645,19 +667,31 @@ class WhatsAppWebhookProcessor:
                     db, business.id, parsed.from_phone, f"[Sent document {filename}]", send_result, user_id=user.id
                 )
 
-                # If first-time user with default business name, provide immediate guidance on setting store details
+                # Track user interactions
+                b_settings = dict(business.settings or {})
+                turns = b_settings.get("user_interaction_count", 1) + 1
+                b_settings["user_interaction_count"] = turns
+                compliance_shown = b_settings.get("compliance_shown", False)
+
                 biz_is_default = bool(business.is_provisional or (business.name and business.name.startswith("WhatsApp Business ")))
-                if biz_is_default:
+                if turns >= 3 and not compliance_shown:
                     setup_note = (
-                        f"💡 *Customize Your Receipts:*\n"
-                        f"Your receipt above currently shows default store details ('{business.name}').\n\n"
-                        "To put your official shop name, address, and logo on all future receipts, reply:\n"
-                        "👉 *Set business name: [Your Store Name]*\n"
-                        "👉 *Set address: [Your Store Address]*\n"
-                        "👉 (Optional) Send your store logo photo with caption *Set logo*"
+                        "🔒 *NDPA Protected:* Your business records are encrypted and 100% private to your phone.\n\n"
+                        "🏪 *Custom Branding:* Whenever you're ready to put your official store name and address on receipts, simply reply:\n"
+                        "👉 *My shop name is [Your Store Name]*"
                     )
+                    b_settings["compliance_shown"] = True
                     note_res = await self.whatsapp.send_text(parsed.from_phone, setup_note)
                     await self.ledger.record_outbound_message(db, business.id, parsed.from_phone, setup_note, note_res, user_id=user.id)
+                elif biz_is_default and turns < 3:
+                    next_note = (
+                        "🎉 *Here is your official receipt!*\n\n"
+                        "💡 *Try this next:* Ask me *'What is my profit today?'* or record another sale by voice note 🎙️"
+                    )
+                    note_res = await self.whatsapp.send_text(parsed.from_phone, next_note)
+                    await self.ledger.record_outbound_message(db, business.id, parsed.from_phone, next_note, note_res, user_id=user.id)
+
+                business.settings = b_settings
 
                 inbound.status = "processed"
                 if hasattr(db, "commit"):
@@ -903,32 +937,38 @@ class WhatsAppWebhookProcessor:
             except Exception as e:
                 logger.warning("Could not save logo: %s", e)
 
-        # Check for statement / loan / data export commands
+        # Check for statement / loan / health profile / credit score / data export commands
         statement_keywords = (
             "download statement", "send statement", "statement", "get statement",
             "account statement", "financial statement", "loan statement", "bank statement",
             "export my data", "export data", "download data", "send my data", "download my data",
-            "business statement", "my statement"
+            "business statement", "my statement", "health profile", "credit score", "my score",
+            "business health", "smedan statement", "loan profile"
         )
         is_statement_cmd = (
             any(lower_text == kw or lower_text.startswith(kw) for kw in statement_keywords)
             or any(kw in lower_text for kw in (
                 "download statement", "send statement", "loan statement", "account statement",
                 "bank statement", "export my data", "export data", "download my data", "download data",
-                "financial statement", "business statement"
+                "financial statement", "business statement", "health profile", "credit score", "my score"
             ))
             or (
-                "statement" in lower_text
-                and any(w in lower_text for w in ("download", "send", "get", "need", "want", "loan", "pdf", "export", "give"))
+                ("statement" in lower_text or "profile" in lower_text or "score" in lower_text)
+                and any(w in lower_text for w in ("download", "send", "get", "need", "want", "loan", "pdf", "export", "give", "check", "my"))
             )
         )
         if is_statement_cmd:
             try:
-                from app.services.receipt_service import ReceiptService
-                receipt_svc = ReceiptService()
-                pdf_bytes, filename, summary = await receipt_svc.generate_statement_pdf(db, business.id, days=30)
+                from app.services.health_profile_pdf_service import BusinessHealthProfilePdfService
+                from app.services.credit_score_service import CreditScoreService
                 
-                caption = f"📄 Official Statement of Business Activity - {business.name}"
+                profile_svc = BusinessHealthProfilePdfService()
+                score_svc = CreditScoreService()
+                
+                pdf_bytes, filename = await profile_svc.generate_health_profile_pdf(db, business.id)
+                score_data = await score_svc.calculate_score(db, business.id)
+                
+                caption = f"📄 Official Business Health & Credit Profile - {business.name}"
                 send_res = await self.whatsapp.send_document_bytes(
                     parsed.from_phone,
                     pdf_bytes,
@@ -940,14 +980,15 @@ class WhatsAppWebhookProcessor:
                 )
 
                 summary_text = (
-                    f"📑 *Official Financial Statement Generated!*\n\n"
-                    f"Store: *{business.name}*\n"
-                    f"Period: *Last 30 Days*\n\n"
-                    f"💰 *Total Sales:* ₦{summary['total_sales']:,.0f} ({summary['sales_count']} sales)\n"
-                    f"💸 *Total Expenses:* ₦{summary['total_expenses']:,.0f} ({summary['expense_count']} expenses)\n"
-                    f"📈 *Net Profit:* ₦{summary['net_profit']:,.0f}\n"
-                    f"🤝 *Pending Receivables:* ₦{summary['total_receivables']:,.0f}\n\n"
-                    "Your official PDF statement is attached above. You can present it to microfinance banks, cooperatives, or loan officers."
+                    f"📊 *Business Financial Health Report Generated*\n\n"
+                    f"🏪 Store: *{business.name}*\n"
+                    f"📈 *Credit Score:* *{score_data['score']} / 850* ({score_data['tier']})\n"
+                    f"🎖️ *Ledger Activity:* {score_data['badge']}\n\n"
+                    f"📅 *Logging Consistency:* {score_data['active_days_last_30']}/30 days logged\n"
+                    f"💰 *30-Day Sales:* ₦{score_data['sales_30d']:,.0f}\n"
+                    f"💸 *30-Day Expenses:* ₦{score_data['expenses_30d']:,.0f}\n"
+                    f"🤝 *Receivables Recovery Ratio:* {score_data['debt_settlement_ratio']}%\n\n"
+                    "📄 Your 2-page Business Financial Health Report PDF is attached above."
                 )
                 text_res = await self.whatsapp.send_text(parsed.from_phone, summary_text)
                 await self.ledger.record_outbound_message(
@@ -1137,6 +1178,21 @@ class WhatsAppWebhookProcessor:
             if not reply_text:
                 raise agent_exc
         if reply_text:
+            b_settings = dict(business.settings or {})
+            turns = b_settings.get("user_interaction_count", 0) + 1
+            b_settings["user_interaction_count"] = turns
+
+            if turns >= 3 and not b_settings.get("compliance_shown", False):
+                compliance_footer = (
+                    "\n\n---\n"
+                    "🔒 *NDPA Protected:* Your business records are encrypted and 100% private to your phone.\n\n"
+                    "🏪 *Tip:* Whenever you want to put your real shop name on receipts, reply:\n"
+                    "👉 *My shop name is [Your Store Name]*"
+                )
+                reply_text += compliance_footer
+                b_settings["compliance_shown"] = True
+
+            business.settings = b_settings
             send_result = await self.whatsapp.send_text(parsed.from_phone, reply_text)
             await self.ledger.record_outbound_message(db, business.id, parsed.from_phone, reply_text, send_result, user_id=user.id)
         inbound.status = "processed"
@@ -1461,42 +1517,13 @@ class WhatsAppWebhookProcessor:
             logger.debug("Non-fatal: could not dispatch new user founder alert: %s", exc)
 
     def _build_onboarding_intro_message(self, invite_verified: bool = False, referral_msg: str = "") -> str:
-        header = "🎉 Welcome to Waasz! Your invite code has been verified and your account is ready.\n\n" if invite_verified else "👋 Welcome to Waasz!\n\n"
-        drive_suggestion = ""
-        if getattr(settings, "google_drive_onboarding_mode", "optional") == "optional":
-            drive_suggestion = (
-                "\n\n☁️ *Optional Google Drive Backup:*\n"
-                "Want your monthly reports automatically backed up to your own Google Drive too? Reply *YES* or *CONNECT DRIVE* anytime to set this up."
-            )
-        elif getattr(settings, "google_drive_onboarding_mode", "optional") == "mandatory":
-            drive_suggestion = (
-                "\n\n☁️ *Google Drive Backup Required:*\n"
-                "To safeguard your records, monthly reports are backed up directly to your Google Drive. Reply *CONNECT DRIVE* now to link your Google account."
-            )
-
+        header = "🎉 Welcome to Waasz! Your account is ready.\n\n" if invite_verified else "👋 Welcome to Waasz!\n\n"
         return (
             f"{header}"
-            "I'm your AI business manager right here on WhatsApp. I help you track daily sales & expenses, monitor stock & low-stock alerts, print instant branded PDF receipts, manage customer debts, and receive weekly & monthly business summaries—*without any paperwork.*\n\n"
-            "🎁 *You have been activated on a 14-Day Free Trial!*\n"
-            "Explore all features freely to track your business numbers and test automated reports.\n\n"
-            "🏪 *First Step — Set up your Shop:*\n"
-            "*What is the name of your shop or business?*\n"
-            "(e.g. reply: *\"Emeka Stores\"* or *\"Blessing Boutique\"*)\n\n"
-            "🧾 *One-Time Setup for Receipts & Invoices:*\n"
-            "To personalize your PDF receipts and invoices with your real store details, you can reply anytime:\n"
-            "• *Set business name: [Your Store Name]* (e.g. _Set business name: Ify Bookshop_)\n"
-            "• *Set address: [Your Store Address]* (e.g. _Set address: 12 Marina, Lagos_)\n"
-            "• (Optional) Send a picture of your store logo with caption *Set logo*\n\n"
-            "💡 *Quick Tip for Receipts:* Whenever you record a sale, you can mention the customer's name (e.g. _'Sold 10 books for ₦30,000 to Mr. Emeka'_) and their name will appear on the receipt!\n\n"
-            "🔒 *Your Data & Privacy:*\n"
-            "• *What we store:* Your chat messages, business transactions, inventory, and registered phone number.\n"
-            "• *Why:* Strictly to maintain your business ledger and generate your performance reports.\n"
-            "• *Access & Security:* Your records are strictly isolated to your business using database row-level security and tenant boundaries. No other business can see your numbers.\n"
-            "• *Data Rights:* You have complete control. You can ask me to *'delete my data'* or *'forget me'* at any time to permanently erase your records from our systems.\n\n"
-            "📌 *Note on AI Advice:* Any business insights, pricing simulations, or forecasts I provide are AI-generated estimates to guide your decision-making, not professional financial, tax, or legal advice. Final business choices always remain yours."
-            f"{drive_suggestion}\n\n"
-            "---\n"
-            "👉 *To get started now: What is the name of your shop or business?*"
+            "I'm your AI business manager right here on WhatsApp. I track your daily sales & expenses, calculate your profit, and print digital receipts — *with zero paperwork.*\n\n"
+            "🚀 *Try it right now in 5 seconds!* Reply with any test sale:\n"
+            "👉 _'Sold 2 bags of rice ₦70,000'_\n"
+            "👉 Or hold the mic and send a quick voice note 🎙️"
             f"{referral_msg}"
         )
 
@@ -1753,7 +1780,12 @@ class WhatsAppWebhookProcessor:
         if not text:
             return None
         t = text.strip()
+        t_lower = t.lower()
         import re
+
+        # If user is asking a question, asking for a report/profile/statement, or querying, NEVER treat as store setup
+        if any(term in t_lower for term in ["health profile", "profile", "statement", "why", "how", "what", "is it", "was", "?", "score", "audit", "connect", "disconnect"]):
+            return None
 
         m_combo = re.search(
             r"(?:(?:my\s+)?(?:store|business|shop)(?:\s+name)?(?:\s+is)?[:\s]+)(.+?)(?:,\s*|\n|\s+and\s+)(?:(?:my\s+)?(?:address|addr|location)(?:\s+is)?[:\s]+)(.+)",
@@ -1772,20 +1804,24 @@ class WhatsAppWebhookProcessor:
             return {"business_name": m_combo2.group(2).strip(), "address": m_combo2.group(1).strip()}
 
         m_name = re.match(
-            r"^(?:set\s+)?(?:my\s+)?(?:business|store|shop)(?:\s+name)?(?:\s+is)?[:\s]+(.+)$",
+            r"^(?:set\s+)?(?:my\s+)?(?:business|store|shop)\s+name\s+is[:\s]+(.+)$",
             t,
             re.IGNORECASE,
         )
-        if m_name and not any(kw in t.lower() for kw in ["address", "addr", "location"]):
-            return {"business_name": m_name.group(1).strip()}
+        if m_name and not any(kw in t_lower for kw in ["address", "addr", "location"]):
+            candidate = m_name.group(1).strip()
+            if len(candidate) > 1 and not candidate.endswith("?"):
+                return {"business_name": candidate}
 
         m_addr = re.match(
-            r"^(?:set\s+)?(?:my\s+)?(?:address|addr|location)(?:\s+is)?[:\s]+(.+)$",
+            r"^(?:set\s+)?(?:my\s+)?(?:address|addr|location)\s+is[:\s]+(.+)$",
             t,
             re.IGNORECASE,
         )
-        if m_addr and not any(kw in t.lower() for kw in ["business", "store", "shop"]):
-            return {"address": m_addr.group(1).strip()}
+        if m_addr and not any(kw in t_lower for kw in ["business", "store", "shop"]):
+            candidate = m_addr.group(1).strip()
+            if len(candidate) > 1 and not candidate.endswith("?"):
+                return {"address": candidate}
 
         return None
 

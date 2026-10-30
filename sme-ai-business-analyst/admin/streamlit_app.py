@@ -522,10 +522,11 @@ if selected_business_id and selected_user_display:
     )
 
 # ---------------------------------------------------------------------------
-# Structured 7-Tab High-Impact Navigation
+# Structured 8-Tab High-Impact Navigation
 # ---------------------------------------------------------------------------
 (
     tab_overview,
+    tab_debts_credit,
     tab_messages,
     tab_confirmations,
     tab_console_broadcast,
@@ -535,6 +536,7 @@ if selected_business_id and selected_user_display:
 ) = st.tabs(
     [
         "📊 Executive Overview",
+        "🏛️ Debt Enforcement & Credit Hub",
         "💬 Message & Delivery Hub",
         "⏳ Confirmations & Drafts",
         "🤖 Bot Console & Broadcast",
@@ -714,7 +716,332 @@ with tab_overview:
         st.dataframe(rollups, use_container_width=True, hide_index=True)
 
 # ===========================================================================
-# TAB 2: MESSAGE & DELIVERY HUB
+# TAB 2: DEBT ENFORCEMENT & CREDIT HUB
+# ===========================================================================
+with tab_debts_credit:
+    st.subheader("🏛️ Debt Enforcement & Capital Readiness Registry")
+    st.caption("Active monitoring of customer credit exposure, automated debtor recovery notices, direct bank transfers, and bank-readiness credit scores.")
+
+    # 1. Executive Debt Metrics
+    debt_where = f"where business_id = '{selected_business_id}'" if selected_business_id else ""
+    debt_kpis = query_df(
+        f"""
+        select
+            coalesce(sum(amount), 0) as total_credit,
+            coalesce(sum(case when status = 'paid' then amount else 0 end), 0) as total_recovered,
+            coalesce(sum(case when status = 'outstanding' then amount else 0 end), 0) as total_outstanding,
+            count(*) as total_count,
+            count(*) filter (where status = 'paid') as paid_count,
+            count(*) filter (where status = 'outstanding') as unpaid_count
+        from debts
+        {debt_where}
+        """
+    )
+
+    tot_credit = float(debt_kpis.iloc[0]["total_credit"]) if not debt_kpis.empty else 0.0
+    tot_rec = float(debt_kpis.iloc[0]["total_recovered"]) if not debt_kpis.empty else 0.0
+    tot_out = float(debt_kpis.iloc[0]["total_outstanding"]) if not debt_kpis.empty else 0.0
+    rec_rate = (tot_rec / tot_credit * 100) if tot_credit > 0 else 0.0
+
+    dk1, dk2, dk3, dk4 = st.columns(4)
+    dk1.metric("Total Credit Tracked", f"₦{tot_credit:,.2f}", help="Total credit sales recorded across merchants")
+    dk2.metric("Capital Recovered", f"₦{tot_rec:,.2f}", help="Total customer debts verified as settled")
+    dk3.metric("Outstanding At-Risk", f"₦{tot_out:,.2f}", delta=f"-₦{tot_out:,.0f}" if tot_out > 0 else "₦0", delta_color="inverse", help="Unsettled credit currently in recovery pipeline")
+    dk4.metric("Network Recovery Rate", f"{rec_rate:.1f}%", help="Percentage of credit successfully recovered")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
+    # Sub-tabs for Debtor Registry, Notice Dispatcher, and Credit Scores
+    subtab_debtors, subtab_dispatch, subtab_scores = st.tabs([
+        "📋 Active Debtor Registry",
+        "🚀 Debtor Notice Dispatcher",
+        "🏆 Merchant Credit Scores & Bank Readiness"
+    ])
+
+    with subtab_debtors:
+        st.markdown("##### 📋 Customer Debt & Recovery Pipeline")
+        st.caption("All customer credit transactions, repayment due dates, and aging status across shops.")
+
+        debts_query = f"""
+            select
+                d.id::text as debt_id,
+                coalesce(c.name, 'Customer') as debtor_name,
+                coalesce(c.phone_number, 'No phone') as debtor_phone,
+                b.name as merchant_store,
+                d.amount,
+                d.due_date,
+                d.status,
+                d.notes,
+                d.created_at
+            from debts d
+            left join customers c on d.customer_id = c.id
+            left join businesses b on d.business_id = b.id
+            {debt_where}
+            order by d.created_at desc
+            limit 100
+        """
+        debts_df = query_df(debts_query)
+
+        if debts_df.empty:
+            st.info("💡 **No customer debts currently recorded.** When merchants record credit sales via WhatsApp (e.g., *'Sold 2 bags rice to Emeka ₦70,000 on credit'* or *'Emeka owes 15k'*), debts appear here automatically with aging and automated recovery schedules.")
+        else:
+            now_utc = datetime.now(UTC)
+            aging_list, amt_disp = [], []
+            for _, r in debts_df.iterrows():
+                amt_disp.append(f"₦{float(r['amount']):,.2f}")
+                st_val = str(r['status']).lower()
+                due_val = r['due_date']
+                if st_val == 'paid':
+                    aging_list.append("🟢 Settled / Paid")
+                elif pd.notna(due_val):
+                    d_dt = pd.to_datetime(due_val)
+                    if d_dt.tzinfo is None:
+                        d_dt = d_dt.tz_localize(UTC)
+                    if now_utc > d_dt:
+                        days_late = (now_utc - d_dt).days
+                        aging_list.append(f"🔴 Overdue ({days_late}d)")
+                    else:
+                        days_left = (d_dt - now_utc).days
+                        aging_list.append(f"🟡 Current ({days_left}d left)")
+                else:
+                    aging_list.append("⚪ Unscheduled")
+
+            view_debts = pd.DataFrame({
+                "Debtor Name": debts_df["debtor_name"],
+                "Debtor Phone": debts_df["debtor_phone"],
+                "Merchant Store": debts_df["merchant_store"],
+                "Amount": amt_disp,
+                "Aging Status": aging_list,
+                "Due Date": pd.to_datetime(debts_df["due_date"]).dt.strftime("%b %d, %Y").fillna("Immediate"),
+                "Notes & Escalation": debts_df["notes"].fillna("-"),
+                "Recorded At": pd.to_datetime(debts_df["created_at"]).dt.strftime("%b %d, %Y"),
+            })
+            st.dataframe(view_debts, use_container_width=True, hide_index=True)
+
+    with subtab_dispatch:
+        st.markdown("##### 🚀 Outbound Debtor Enforcement Dispatcher")
+        st.caption("Dispatch an institutional recovery notice directly to a debtor on behalf of a merchant with direct bank transfer instructions.")
+
+        col_d1, col_d2 = st.columns([1, 1])
+        with col_d1:
+            biz_opts = users_directory["business_id"].tolist() if not users_directory.empty else []
+            sel_b_id = st.selectbox(
+                "Select Merchant / Store",
+                options=biz_opts,
+                format_func=lambda x: user_labels.get(x, x),
+                key="disp_biz_selector"
+            )
+
+            d_name = st.text_input("Debtor Full Name", value="Emeka Okafor", key="disp_debtor_name")
+            d_phone = st.text_input("Debtor Phone Number (E.164)", value="08012345678", key="disp_debtor_phone")
+            d_amount = st.number_input("Amount Owed (₦)", min_value=100.0, value=25000.0, step=1000.0, key="disp_amount")
+            d_due = st.date_input("Repayment Due Date", value=datetime.now().date() + timedelta(days=3), key="disp_due_date")
+
+            stage_sel = st.selectbox(
+                "Escalation Stage",
+                options=[1, 2, 3, 4],
+                format_func=lambda s: {
+                    1: "Stage 1: Digital IOU & Transaction Confirmation",
+                    2: "Stage 2: Due Date Settlement Reminder",
+                    3: "Stage 3: Reputational Leverage / Trade Network Flag Warning",
+                    4: "Stage 4: Formal Civil Demand & Commercial Restriction",
+                }.get(s, f"Stage {s}"),
+                key="disp_stage_sel"
+            )
+
+        with col_d2:
+            st.markdown("###### 📱 Live Message Preview (Delivered to Debtor)")
+            biz_name_clean = user_labels.get(sel_b_id, "Store").split("—")[-1].strip() if sel_b_id else "Verified Merchant"
+            
+            # Format preview
+            if stage_sel == 1:
+                prev_text = (
+                    f"🏛️ WAASZ VERIFIED MERCHANT REGISTRY\n"
+                    f"Transaction Ref: #WZ-DEMO\n\n"
+                    f"Dear {d_name},\n\n"
+                    f"This is an automated confirmation that a credit transaction of ₦{d_amount:,.2f} "
+                    f"from {biz_name_clean} has been formally registered.\n\n"
+                    f"📅 Due Date: {d_due.strftime('%d %b %Y')}\n"
+                    f"💳 Settlement Details:\nBank: Moniepoint MFB | Account: 8201928391 ({biz_name_clean})\n\n"
+                    f"Please transfer directly to the merchant account above on or before the due date "
+                    f"and quote Ref #WZ-DEMO as your transfer remark.\n\n"
+                    f"Waasz Commercial Registry — Protecting Verified Retail Trade in Nigeria."
+                )
+            elif stage_sel == 2:
+                prev_text = (
+                    f"⚠️ WAASZ SETTLEMENT NOTICE\n"
+                    f"Account Ref: #WZ-DEMO\n\n"
+                    f"Dear {d_name},\n\n"
+                    f"Your balance of ₦{d_amount:,.2f} with {biz_name_clean} is due for settlement today.\n\n"
+                    f"💳 Remit to Merchant Account:\nBank: Moniepoint MFB | Account: 8201928391 ({biz_name_clean})\n\n"
+                    f"Kindly forward your transfer receipt to {biz_name_clean} once completed to mark your record as cleared."
+                )
+            elif stage_sel == 3:
+                prev_text = (
+                    f"🚨 OVERDUE NOTICE — ACTION REQUIRED\n"
+                    f"Registry File: #WZ-DEMO\n\n"
+                    f"Dear {d_name},\n\n"
+                    f"Your credit balance of ₦{d_amount:,.2f} owed to {biz_name_clean} is now PAST DUE.\n\n"
+                    f"Failure to settle within 24 hours will result in your contact details being flagged across the Waasz Verified Merchant Network as a credit risk, which may restrict future credit purchases with partner merchants.\n\n"
+                    f"💳 Settle Immediately To:\nBank: Moniepoint MFB | Account: 8201928391 ({biz_name_clean})\nQuote #WZ-DEMO in payment narration."
+                )
+            else:
+                prev_text = (
+                    f"⚖️ FORMAL DEMAND FOR SETTLEMENT\n"
+                    f"File Ref: #WZ-DEMO\n\n"
+                    f"ATTENTION: {d_name.upper()}\n\n"
+                    f"The outstanding sum of ₦{d_amount:,.2f} owed to {biz_name_clean} remains unpaid despite prior notices.\n\n"
+                    f"Be advised that continued default constitutes commercial breach and is scheduled for referral for civil recovery and merchant trade blacklisting.\n\n"
+                    f"To prevent restrictions, pay in full immediately:\n💳 Bank: Moniepoint MFB | Account: 8201928391 ({biz_name_clean})"
+                )
+
+            st.text_area("Debtor WhatsApp / SMS Copy", value=prev_text, height=260, disabled=True)
+
+            if st.button("🚀 Dispatch Notice to Debtor", key="btn_dispatch_debtor_notice", use_container_width=True):
+                if d_phone.strip():
+                    from concurrent.futures import ThreadPoolExecutor
+                    import asyncio
+
+                    def _run_dispatch():
+                        async def _exec():
+                            from app.services.debt_notifier_service import DebtNotifierService
+                            notifier = DebtNotifierService()
+                            clean_p = notifier.normalize_phone(d_phone)
+                            res = await notifier.whatsapp.send_text(clean_p, prev_text)
+                            return res.success, res.error_message
+
+                        with ThreadPoolExecutor(max_workers=1) as ex:
+                            return ex.submit(lambda: asyncio.run(_exec())).result()
+
+                    with st.spinner("Dispatching official notice to debtor..."):
+                        try:
+                            ok, err = _run_dispatch()
+                            if ok:
+                                st.success(f"✅ Official Notice Dispatched to {d_phone} successfully!")
+                            else:
+                                st.warning(f"⚠️ Dispatch attempted. Meta response: {err or 'Message accepted for delivery'}")
+                        except Exception as e_disp:
+                            st.error(f"Error dispatching notice: {e_disp}")
+                else:
+                    st.error("Please enter a valid phone number for the debtor.")
+
+    with subtab_scores:
+        st.markdown("##### 🏆 Merchant Credit Scoring & Loan-Readiness Registry")
+        st.caption("Live evaluation of all onboarded shops: daily logging consistency, 30-day streak count, credit score (300 to 850), and certified loan profile generator.")
+
+        # Query all businesses with transaction aggregates
+        scores_query = """
+            select
+                b.id::text as business_id,
+                b.name as business_name,
+                coalesce(u.phone_number, b.phone_number) as phone_number,
+                count(t.id) as total_txs,
+                count(t.id) filter (where t.transaction_type = 'sale' and t.status = 'confirmed') as sales_count,
+                count(t.id) filter (where t.transaction_type = 'expense' and t.status = 'confirmed') as expense_count,
+                coalesce(sum(case when t.transaction_type = 'sale' and t.status = 'confirmed' then t.amount else 0 end), 0) as total_sales,
+                coalesce(sum(case when t.transaction_type = 'expense' and t.status = 'confirmed' then t.amount else 0 end), 0) as total_expenses,
+                count(distinct date(t.created_at)) filter (where t.status = 'confirmed' and t.created_at >= now() - interval '30 days') as active_days_30d
+            from businesses b
+            left join users u on u.business_id = b.id
+            left join transactions t on t.business_id = b.id
+            where b.deleted_at is null
+            group by b.id, b.name, b.phone_number, u.phone_number
+            order by total_sales desc
+        """
+        raw_scores = query_df(scores_query)
+
+        if not raw_scores.empty:
+            b_names, b_phones, b_scores, b_tiers, b_streaks, b_vols, b_ids = [], [], [], [], [], [], []
+            for _, r in raw_scores.iterrows():
+                b_names.append(r["business_name"] or "Shop")
+                b_phones.append(r["phone_number"] or "-")
+                days_30 = int(r["active_days_30d"] or 0)
+                tot_s = float(r["total_sales"] or 0)
+                tot_e = float(r["total_expenses"] or 0)
+
+                base = 400
+                streak_pts = min(220, days_30 * 12)
+                margin_pts = 0
+                if tot_s > 0:
+                    net_m = (tot_s - tot_e) / tot_s
+                    if net_m >= 0.15:
+                        margin_pts = 130
+                    elif net_m > 0:
+                        margin_pts = 70
+                exp_pts = 100 if int(r["expense_count"] or 0) > 0 else 0
+                final_score = min(850, base + streak_pts + margin_pts + exp_pts)
+
+                if final_score >= 650:
+                    tier_str = "🟢 Bank-Ready"
+                elif final_score >= 500:
+                    tier_str = "🟡 Developing"
+                else:
+                    tier_str = "🔴 Informal"
+
+                b_scores.append(final_score)
+                b_tiers.append(tier_str)
+                b_streaks.append(f"{days_30} / 30 Days")
+                b_vols.append(f"₦{tot_s:,.2f}")
+                b_ids.append(r["business_id"])
+
+            scores_view = pd.DataFrame({
+                "Merchant Store": b_names,
+                "Phone": b_phones,
+                "Credit Score": b_scores,
+                "Capital Tier": b_tiers,
+                "30-Day Logging Streak": b_streaks,
+                "30-Day Gross Volume": b_vols,
+            })
+            st.dataframe(scores_view, use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.markdown("###### 📄 Instant Business Health Profile PDF Export")
+            st.caption("Generate and inspect the official, stamped 2-page audited statement for any onboarded merchant.")
+
+            c_pdf_sel, c_pdf_btn = st.columns([2, 1])
+            with c_pdf_sel:
+                selected_pdf_biz = st.selectbox(
+                    "Choose Merchant for Health Profile Statement",
+                    options=b_ids,
+                    format_func=lambda bid: next((b_names[i] for i, x in enumerate(b_ids) if x == bid), bid),
+                    key="sel_health_pdf_biz"
+                )
+
+            with c_pdf_btn:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                if st.button("📥 Generate & Download PDF", key="btn_download_health_pdf", use_container_width=True):
+                    from concurrent.futures import ThreadPoolExecutor
+                    import asyncio
+
+                    def _generate_pdf_bytes():
+                        async def _build():
+                            from app.core.database import async_session_factory
+                            from app.services.health_profile_pdf_service import BusinessHealthProfilePdfService
+                            from uuid import UUID
+                            async with async_session_factory() as sess:
+                                svc = BusinessHealthProfilePdfService()
+                                return await svc.generate_health_profile_pdf(sess, UUID(selected_pdf_biz))
+
+                        with ThreadPoolExecutor(max_workers=1) as ex:
+                            return ex.submit(lambda: asyncio.run(_build())).result()
+
+                    with st.spinner("Generating stamped 2-page Health Profile PDF..."):
+                        try:
+                            pdf_bytes, filename = _generate_pdf_bytes()
+                            st.download_button(
+                                label=f"💾 Download {filename}",
+                                data=pdf_bytes,
+                                file_name=filename,
+                                mime="application/pdf",
+                                use_container_width=True,
+                                key="health_pdf_download_ready"
+                            )
+                            st.success(f"Generated {filename} successfully!")
+                        except Exception as e_pdf:
+                            st.error(f"Failed to generate statement: {e_pdf}")
+
+# ===========================================================================
+# TAB 3: MESSAGE & DELIVERY HUB
 # ===========================================================================
 with tab_messages:
     st.subheader("💬 WhatsApp Messages & Live Delivery Pulse")
