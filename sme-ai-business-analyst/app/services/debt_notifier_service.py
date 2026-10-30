@@ -189,30 +189,32 @@ class DebtNotifierService:
                 "parameters": [
                     {"type": "text", "text": ref_code},
                     {"type": "text", "text": customer.name},
-                    {"type": "text", "text": format_naira(debt.amount)},
                     {"type": "text", "text": biz.name},
+                    {"type": "text", "text": format_naira(debt.amount)},
                     {"type": "text", "text": due_date_str},
                     {"type": "text", "text": bank_info},
                 ],
             }
         ]
-        send_res = await self.whatsapp.send_template(
-            debtor_phone,
-            template_name="merchant_credit_iou_v1",
-            language_code="en",
-            components=template_components,
-        )
-        if not send_res.success and "132001" in str(send_res.error_message):
-            send_res = await self.whatsapp.send_template(
-                debtor_phone,
-                template_name="merchant_credit_iou_v1",
-                language_code="en_US",
-                components=template_components,
-            )
+        # Attempt delivery with v2 first, then fallback to v1 across both en and en_US
+        send_res = None
+        for tmpl in ["merchant_credit_iou_v2", "merchant_credit_iou_v1"]:
+            for lang in ["en", "en_US"]:
+                send_res = await self.whatsapp.send_template(
+                    debtor_phone,
+                    template_name=tmpl,
+                    language_code=lang,
+                    components=template_components,
+                )
+                if send_res.success:
+                    break
+            if send_res and send_res.success:
+                break
 
-        # Fallback to direct text if template is unavailable or rejected
-        if not send_res.success:
-            logger.info("Template merchant_credit_iou_v1 not available (%s); falling back to direct text", send_res.error_message)
+        # Fallback to direct text if templates are unavailable or rejected
+        if not send_res or not send_res.success:
+            err = send_res.error_message if send_res else "No response"
+            logger.info("Template not available (%s); falling back to direct text", err)
             send_res = await self.whatsapp.send_text(debtor_phone, notice_body)
         
         # Record into whatsapp_messages table for full audit and visibility
