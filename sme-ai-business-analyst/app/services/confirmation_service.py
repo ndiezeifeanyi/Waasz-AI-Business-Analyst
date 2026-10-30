@@ -1,3 +1,4 @@
+import urllib.parse
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -5,7 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.activity import Activity
+from app.models.business import Business
 from app.models.confirmation import Confirmation
+from app.models.customer import Customer
 from app.models.debt import Debt
 from app.models.inventory import InventoryItem, InventoryMovement
 from app.models.task import Task
@@ -230,6 +233,49 @@ class ConfirmationService:
                 total_sum = sum((t.amount or Decimal("0")) for t in transactions)
                 plural_type = "sales" if transactions[0].transaction_type == "sale" else "expenses"
                 base_text = f"Done! I have confirmed and recorded all {len(transactions)} {plural_type} (Total: {format_naira(total_sum)})."
+            elif transactions[0].is_credit and transactions[0].customer_id:
+                cust = await db.get(Customer, transactions[0].customer_id)
+                biz = await db.get(Business, transactions[0].business_id)
+                cust_name = cust.name if cust else "Customer"
+                cust_phone = cust.phone_number if cust else ""
+                amt_fmt = format_naira(transactions[0].amount)
+                item_desc = transactions[0].item_name or "goods"
+                ref_code = f"WZ-{str(transactions[0].id).split('-')[0].upper()}"
+                due_str = "Immediate / On Demand"
+                if confirmation.extracted_record and confirmation.extracted_record.get("due_date"):
+                    due_str = str(confirmation.extracted_record["due_date"])[:10]
+
+                base_text = (
+                    f"Done! Confirmed credit sale of {item_desc} ({amt_fmt}) and recorded customer debt.\n\n"
+                    f"🤝 *Digital IOU Generated (#{ref_code})*\n"
+                    f"• *Customer:* {cust_name}" + (f" ({cust_phone})\n" if cust_phone else "\n") +
+                    f"• *Amount:* {amt_fmt}\n"
+                    f"• *Due Date:* {due_str}\n"
+                )
+
+                if cust_phone:
+                    from app.services.debt_notifier_service import DebtNotifierService
+                    notifier = DebtNotifierService()
+                    norm_phone = notifier.normalize_phone(cust_phone)
+                    bank_info = notifier._get_merchant_bank_info(biz) if biz else f"Account: {biz.name if biz else 'Merchant'}"
+                    notice_text = notifier.build_notice_text(
+                        stage=1,
+                        debtor_name=cust_name,
+                        biz_name=biz.name if biz else "Merchant",
+                        amount=transactions[0].amount or Decimal("0"),
+                        due_date_str=due_str,
+                        bank_info=bank_info,
+                        ref_code=ref_code,
+                    )
+                    wa_link = f"https://wa.me/{norm_phone}?text={urllib.parse.quote(notice_text)}"
+                    base_text += (
+                        f"\n📲 *Deliver IOU to {cust_name}:*\n"
+                        f"Tap below to send this official IOU notice directly to {cust_name} on WhatsApp:\n"
+                        f"👉 {wa_link}\n\n"
+                        f"(Or text 'Send IOU to {cust_name}' to dispatch via automated registry)"
+                    )
+                else:
+                    base_text += f"\n💡 *Tip:* Text me {cust_name}'s phone number to generate an instant 1-tap WhatsApp IOU link."
             else:
                 base_text = confirmation_success_text(transactions[0].transaction_type, is_credit=transactions[0].is_credit)
 

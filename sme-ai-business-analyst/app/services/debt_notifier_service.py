@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.models.business import Business
 from app.models.customer import Customer
 from app.models.debt import Debt
+from app.models.message import WhatsAppMessage
 from app.services.whatsapp_client import WhatsAppClient
 from app.utils.currency import format_naira
 
@@ -171,6 +172,23 @@ class DebtNotifierService:
         # Dispatch via WhatsApp to the debtor
         send_res = await self.whatsapp.send_text(debtor_phone, notice_body)
         
+        # Record into whatsapp_messages table for full audit and visibility
+        try:
+            out_msg = WhatsAppMessage(
+                business_id=biz.id,
+                direction="outbound",
+                to_phone=debtor_phone,
+                message_type="text",
+                body=notice_body,
+                whatsapp_message_id=send_res.message_id,
+                status="sent" if send_res.success else "failed",
+                error_message=send_res.error_message,
+                sent_at=datetime.now(UTC) if send_res.success else None,
+            )
+            db.add(out_msg)
+        except Exception as e:
+            logger.warning("Could not record outbound debt notice message: %s", e)
+
         # Log dispatch into debt notes
         now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
         dispatch_note = f"[Notice Stage {stage} sent to {debtor_phone} on {now_str}]"
@@ -185,6 +203,8 @@ class DebtNotifierService:
             send_res.success,
         )
 
+        wa_link = f"https://wa.me/{debtor_phone}?text={urllib.parse.quote(notice_body)}"
+
         return {
             "status": "sent" if send_res.success else "queued_or_failed",
             "debtor_name": customer.name,
@@ -193,6 +213,7 @@ class DebtNotifierService:
             "stage": stage,
             "ref_code": ref_code,
             "notice_text": notice_body,
+            "wa_link": wa_link,
             "success": send_res.success,
             "error": send_res.error_message,
         }
@@ -268,10 +289,13 @@ class DebtNotifierService:
         label = stage_labels.get(stage, f"Stage {stage} Notice")
 
         return (
-            f"✅ *Official {label} Dispatched!*\n\n"
+            f"✅ *Official {label} Processed!*\n\n"
             f"• *Debtor:* {res['debtor_name']} ({res['debtor_phone']})\n"
             f"• *Amount:* {format_naira(res['amount'])}\n"
-            f"• *Reference Code:* #{res['ref_code']}\n\n"
-            f"Waasz has delivered the formal notice directly to {res['debtor_name']} with your bank details. "
-            f"Once they make the transfer, simply forward their receipt or text me to mark it cleared!"
+            f"• *Ref Code:* #{res['ref_code']}\n\n"
+            f"📲 *1-Tap Direct WhatsApp Delivery:*\n"
+            f"Because WhatsApp blocks automated messages to contacts that haven't messaged this business line first (Meta 24h Policy), tap below to send the official IOU straight from your WhatsApp with 100% guaranteed delivery:\n"
+            f"👉 {res['wa_link']}\n\n"
+            f"📄 *Notice Content:*\n"
+            f"{res['notice_text']}"
         )
