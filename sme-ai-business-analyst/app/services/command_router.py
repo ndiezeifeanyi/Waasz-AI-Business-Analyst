@@ -73,6 +73,11 @@ class CommandRouter:
 
         logger.info("CommandRouter triggered for business %s: %s (args=%s)", business.id, cmd_name, cmd_args)
 
+        # If user provided transaction details after the command (e.g. "/receipt sold 2 bags 10k"),
+        # fall through to LLM extraction so the new transaction is recorded and receipt/invoice offered!
+        if cmd_args and cmd_name in {"receipt", "invoice", "iou"}:
+            return False
+
         # -------------------------------------------------------------------
         # 1. /menu -> Native WhatsApp Interactive List Drawer
         # -------------------------------------------------------------------
@@ -81,7 +86,7 @@ class CommandRouter:
             return True
 
         # -------------------------------------------------------------------
-        # 2. /receipt -> Instant PDF Receipt
+        # 2. /receipt -> Instant Cash PDF Receipt
         # -------------------------------------------------------------------
         if cmd_name in {"receipt", "rcpt", "cmd_receipt"}:
             await self._handle_receipt(db, business, user, phone, is_credit_only=False)
@@ -109,13 +114,17 @@ class CommandRouter:
             return True
 
         # -------------------------------------------------------------------
-        # 6. /statement -> Download 2-Page Institutional Health Profile PDF
+        # 6. /statement -> 30-Day Account Ledger Statement (Cashflow & Entries)
         # -------------------------------------------------------------------
-        # -------------------------------------------------------------------
-        # 6. /statement -> Download 2-Page Institutional Health Profile PDF
-        # -------------------------------------------------------------------
-        if cmd_name in {"statement", "stmt", "healthprofile", "bankprofile", "smedan", "downloadstatement", "cmd_statement"}:
+        if cmd_name in {"statement", "stmt", "downloadstatement", "accountstatement", "cmd_statement"}:
             await self._handle_statement(db, business, user, phone)
+            return True
+
+        # -------------------------------------------------------------------
+        # 6b. /profile -> 2-Page Institutional Business Health Profile PDF
+        # -------------------------------------------------------------------
+        if cmd_name in {"profile", "healthprofile", "bankprofile", "smedan", "businessprofile", "cmd_profile"}:
+            await self._handle_profile(db, business, user, phone)
             return True
 
         # -------------------------------------------------------------------
@@ -220,12 +229,17 @@ class CommandRouter:
                 ],
             },
             {
-                "title": "🏦 Statements & Score",
+                "title": "🏦 Statement & Profile",
                 "rows": [
                     {
                         "id": "cmd_statement",
-                        "title": "🏛️ Bank Statement PDF",
-                        "description": "Download 2-page institutional underwriting PDF",
+                        "title": "🏛️ Account Statement",
+                        "description": "30-day cashflow & transaction ledger",
+                    },
+                    {
+                        "id": "cmd_profile",
+                        "title": "📑 Business Profile PDF",
+                        "description": "2-page bank underwriting & SMEDAN PDF",
                     },
                     {
                         "id": "cmd_score",
@@ -235,7 +249,7 @@ class CommandRouter:
                 ],
             },
             {
-                "title": "📊 Books & Stock",
+                "title": "📊 Books & Debtors",
                 "rows": [
                     {
                         "id": "cmd_sales",
@@ -247,25 +261,20 @@ class CommandRouter:
                         "title": "👥 Debtors Table",
                         "description": "Active customer debt balances",
                     },
+                ],
+            },
+            {
+                "title": "☁️ Stock & Backup",
+                "rows": [
                     {
                         "id": "cmd_stock",
                         "title": "📦 Stock Inventory",
                         "description": "Stock on hand & low-stock alerts",
                     },
-                ],
-            },
-            {
-                "title": "☁️ Cloud & Analytics",
-                "rows": [
                     {
                         "id": "cmd_drive",
                         "title": "🔗 Google Drive Backup",
                         "description": "Automated cloud archive setup",
-                    },
-                    {
-                        "id": "cmd_chart",
-                        "title": "📊 Financial Chart",
-                        "description": "Visual 7-day revenue trend chart",
                     },
                 ],
             },
@@ -273,9 +282,9 @@ class CommandRouter:
 
         body_text = (
             f"👋 *Welcome to {business.name or 'Waasz AI'} Quick Actions*\n\n"
-            "Tap *'Select Action'* below for 1-tap navigation, or type any slash command:\n"
+            "Tap *'Select Action'* below for instant 1-tap navigation, or type any shortcut:\n"
             "• `/receipt` • `/invoice` • `/iou` • `/statement`\n"
-            "• `/score` • `/sales` • `/debtors` • `/stock` • `/drive`"
+            "• `/profile` • `/score` • `/sales` • `/stock` • `/drive`"
         )
 
         send_res = await self.whatsapp.send_interactive_list(
@@ -326,6 +335,13 @@ class CommandRouter:
             caption = f"📄 {doc_type} #{filename.replace('.pdf', '')} - {business.name}"
             send_res = await self.whatsapp.send_document_bytes(phone, pdf_bytes, filename=filename, caption=caption)
             await self.ledger.record_outbound_message(db, business.id, phone, f"[Sent document {filename}]", send_res, user_id=user.id)
+
+            followup = (
+                f"💡 *Need to issue a receipt for a new sale right now?*\n"
+                f"Just text or send a voice note: *'Sold [Item] for [Amount]'* (or *'/receipt [Item] [Amount]'*), and I'll generate and send your new receipt immediately!"
+            )
+            f_res = await self.whatsapp.send_text(phone, followup)
+            await self.ledger.record_outbound_message(db, business.id, phone, followup, f_res, user_id=user.id)
         except Exception as exc:
             logger.error("Failed to generate PDF document: %s", exc)
             err_msg = "⚠️ Could not generate PDF right now. Please record a confirmed sale first."
@@ -417,7 +433,55 @@ class CommandRouter:
         await self.ledger.record_outbound_message(db, business.id, phone, summary, send_res, user_id=user.id)
 
     async def _handle_statement(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
-        """Compiles and delivers 2-page Financial Health Report PDF."""
+        """Generates an itemized Account Transaction Statement (Sales & Expenses Ledger)."""
+        now = datetime.now(UTC)
+        start_date = now - timedelta(days=30)
+
+        stmt = (
+            select(Transaction)
+            .where(
+                Transaction.business_id == business.id,
+                Transaction.status == "confirmed",
+                Transaction.occurred_at >= start_date,
+            )
+            .order_by(Transaction.occurred_at.desc())
+        )
+        res = await db.execute(stmt)
+        txs = res.scalars().all()
+
+        sales = [t for t in txs if t.transaction_type == "sale"]
+        expenses = [t for t in txs if t.transaction_type == "expense"]
+        total_sales = sum(t.amount for t in sales)
+        total_exp = sum(t.amount for t in expenses)
+        net_cash = total_sales - total_exp
+
+        lines = [
+            f"🏛️ *Account Statement — {business.name}*",
+            f"📅 *Period:* {start_date.strftime('%d %b')} – {now.strftime('%d %b %Y')} (Last 30 Days)",
+            "---------------------------------------",
+            f"📈 *Total Inflow (Sales):* {format_naira(total_sales)} ({len(sales)} txns)",
+            f"💸 *Total Outflow (Expenses):* {format_naira(total_exp)} ({len(expenses)} txns)",
+            f"💰 *Net Cashflow:* {format_naira(net_cash)}",
+            "---------------------------------------",
+            "*Recent Ledger Transactions:*"
+        ]
+        if not txs:
+            lines.append("• No confirmed transactions recorded in the last 30 days.")
+        else:
+            for t in txs[:12]:
+                sign = "➕" if t.transaction_type == "sale" else "➖"
+                d_str = t.occurred_at.strftime("%d %b")
+                desc = t.item_name or t.description or t.transaction_type.capitalize()
+                credit_tag = " (Credit)" if t.is_credit else ""
+                lines.append(f"{sign} {d_str} | {desc}{credit_tag} | {format_naira(t.amount)}")
+
+        lines.append("\n💡 To download your institutional bank underwriting report, type *'/profile'*.")
+        statement_msg = "\n".join(lines)
+        send_res = await self.whatsapp.send_text(phone, statement_msg)
+        await self.ledger.record_outbound_message(db, business.id, phone, statement_msg, send_res, user_id=user.id)
+
+    async def _handle_profile(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
+        """Compiles and delivers 2-page Institutional Financial Health Profile PDF."""
         pdf_svc = BusinessHealthProfilePdfService()
         score_svc = CreditScoreService()
         try:
@@ -429,7 +493,7 @@ class CommandRouter:
             await self.ledger.record_outbound_message(db, business.id, phone, f"[Sent document {filename}]", send_res, user_id=user.id)
 
             summary = (
-                f"🏛️ *Financial Health Report Generated*\n\n"
+                f"📑 *Business Financial Health Profile Generated*\n\n"
                 f"• Business: *{business.name}*\n"
                 f"• Underwriting Score: *{score_data.get('score', 650)} / 850* ({score_data.get('tier', 'Developing')})\n"
                 f"• 30-Day Revenue: ₦{score_data.get('sales_30d', 0):,.0f}\n"
@@ -439,8 +503,8 @@ class CommandRouter:
             text_res = await self.whatsapp.send_text(phone, summary)
             await self.ledger.record_outbound_message(db, business.id, phone, summary, text_res, user_id=user.id)
         except Exception as exc:
-            logger.error("Failed to generate statement: %s", exc)
-            err_msg = "⚠️ Could not generate statement. Please ensure you have recorded confirmed sales or expenses first."
+            logger.error("Failed to generate profile: %s", exc)
+            err_msg = "⚠️ Could not generate business profile. Please ensure you have recorded confirmed sales or expenses first."
             send_res = await self.whatsapp.send_text(phone, err_msg)
             await self.ledger.record_outbound_message(db, business.id, phone, err_msg, send_res, user_id=user.id)
 
@@ -539,14 +603,22 @@ class CommandRouter:
         """Lists inventory on hand or low stock alerts."""
         stmt = select(InventoryItem).where(InventoryItem.business_id == business.id)
         if low_only:
-            stmt = stmt.where(InventoryItem.quantity_on_hand <= InventoryItem.reorder_threshold)
+            stmt = stmt.where(InventoryItem.quantity_on_hand <= func.coalesce(InventoryItem.low_stock_threshold, Decimal("5")))
         stmt = stmt.order_by(InventoryItem.item_name.asc())
 
         res = await db.execute(stmt)
         items = res.scalars().all()
 
         if not items:
-            msg = "ℹ️ No low-stock items detected! All tracked products are above reorder thresholds." if low_only else "ℹ️ No inventory items tracked yet. Text *'I have 50 bags of cement'* to start tracking."
+            if low_only:
+                any_stmt = select(func.count(InventoryItem.id)).where(InventoryItem.business_id == business.id)
+                any_count = (await db.execute(any_stmt)).scalar() or 0
+                if any_count == 0:
+                    msg = "ℹ️ You haven't added any tracked inventory items yet.\nText e.g. *'I have 50 bags of cement, minimum 10'* to start tracking stock and getting low-stock alerts!"
+                else:
+                    msg = "🎉 *Healthy Stock:* No low-stock items detected! All your tracked products are safely above their reorder thresholds."
+            else:
+                msg = "ℹ️ No inventory items tracked yet. Text e.g. *'I have 50 bags of cement'* to start tracking stock."
             send_res = await self.whatsapp.send_text(phone, msg)
             await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
             return
@@ -554,8 +626,9 @@ class CommandRouter:
         header = "⚠️ *Low Stock Restock Alerts*" if low_only else f"📦 *Current Inventory Status ({len(items)} items)*"
         lines = [header, "---------------------------------------"]
         for it in items[:15]:
-            status_dot = "🔴" if it.quantity_on_hand <= (it.reorder_threshold or 0) else "🟢"
-            lines.append(f"{status_dot} *{it.item_name}:* {it.quantity_on_hand:g} {it.unit or 'units'} (Min: {it.reorder_threshold or 0:g})")
+            min_thresh = it.low_stock_threshold or Decimal("5")
+            status_dot = "🔴" if it.quantity_on_hand <= min_thresh else "🟢"
+            lines.append(f"{status_dot} *{it.item_name}:* {it.quantity_on_hand:g} {it.unit or 'units'} (Min: {min_thresh:g})")
 
         lines.append("\n💡 Text *'Correct [Item] stock to [Qty]'* to reconcile physical count.")
         summary = "\n".join(lines)
