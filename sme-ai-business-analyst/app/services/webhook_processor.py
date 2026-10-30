@@ -583,7 +583,8 @@ class WhatsAppWebhookProcessor:
         else:
             action = normalize_confirmation_reply(parsed.body, parsed.interactive_reply_id)
             is_receipt_action = (parsed.interactive_reply_id or "").startswith("receipt_") or (parsed.body or "").strip().lower() in {"send receipt", "receipt", "📄 send receipt"}
-            if not is_receipt_action and (parsed.interactive_reply_id or action != "unknown"):
+            is_command_action = (parsed.interactive_reply_id or "").startswith("cmd_")
+            if not is_receipt_action and not is_command_action and (parsed.interactive_reply_id or action != "unknown"):
                 logger.info(
                     "Idempotency: confirmation reply %s (%s) received for already-resolved or absent pending confirmation. Silently no-oping.",
                     parsed.message_id,
@@ -971,16 +972,17 @@ class WhatsAppWebhookProcessor:
             "business statement", "my statement", "health profile", "credit score", "my score",
             "business health", "smedan statement", "loan profile"
         )
-        is_statement_cmd = (
+        is_question = any(lower_text.startswith(q) for q in ["why", "what", "how", "who", "when", "where", "is", "can", "could", "should", "tell me"]) or "?" in lower_text
+        is_statement_cmd = not is_question and (
             any(lower_text == kw or lower_text.startswith(kw) for kw in statement_keywords)
             or any(kw in lower_text for kw in (
                 "download statement", "send statement", "loan statement", "account statement",
                 "bank statement", "export my data", "export data", "download my data", "download data",
-                "financial statement", "business statement", "health profile", "credit score", "my score"
+                "financial statement", "business statement", "health profile", "smedan statement", "loan profile"
             ))
             or (
-                ("statement" in lower_text or "profile" in lower_text or "score" in lower_text)
-                and any(w in lower_text for w in ("download", "send", "get", "need", "want", "loan", "pdf", "export", "give", "check", "my"))
+                ("statement" in lower_text or "financial health" in lower_text)
+                and any(w in lower_text for w in ("download", "send", "get", "need", "want", "loan", "pdf", "export", "give"))
             )
         )
         if is_statement_cmd:

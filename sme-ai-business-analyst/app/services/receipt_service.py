@@ -37,6 +37,7 @@ class ReceiptService:
         member_id: UUID | None = None,
         confirmation_id: UUID | None = None,
         transaction_ids: list[UUID] | None = None,
+        credit_only: bool | None = None,
     ) -> tuple[bytes, str, Transaction]:
         """
         Builds the PDF document for a confirmed sale transaction or multi-item sale batch.
@@ -125,9 +126,12 @@ class ReceiptService:
                     Transaction.transaction_type == "sale",
                     Transaction.status == "confirmed",
                 )
-                .order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc())
-                .limit(1)
             )
+            if credit_only is True:
+                tx_stmt = tx_stmt.where(Transaction.is_credit.is_(True))
+            elif credit_only is False:
+                tx_stmt = tx_stmt.where(Transaction.is_credit.is_(False))
+            tx_stmt = tx_stmt.order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc()).limit(1)
             tx_res = await db.execute(tx_stmt)
             primary_tx = tx_res.scalar_one_or_none()
             if primary_tx:
@@ -155,9 +159,12 @@ class ReceiptService:
                     Transaction.transaction_type == "sale",
                     Transaction.status == "confirmed",
                 )
-                .order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc())
-                .limit(1)
             )
+            if credit_only is True:
+                tx_stmt = tx_stmt.where(Transaction.is_credit.is_(True))
+            elif credit_only is False:
+                tx_stmt = tx_stmt.where(Transaction.is_credit.is_(False))
+            tx_stmt = tx_stmt.order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc()).limit(1)
             tx_res = await db.execute(tx_stmt)
             primary_tx = tx_res.scalar_one_or_none()
             if primary_tx:

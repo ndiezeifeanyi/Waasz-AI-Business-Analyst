@@ -204,18 +204,18 @@ class CommandRouter:
                 "rows": [
                     {
                         "id": "cmd_receipt",
-                        "title": "📄 Latest Receipt",
-                        "description": "Download PDF receipt for latest sale",
+                        "title": "📄 Cash Receipt",
+                        "description": "Download PDF for latest cash sale",
                     },
                     {
                         "id": "cmd_invoice",
                         "title": "📑 Credit Invoice",
-                        "description": "Download credit invoice with payment terms",
+                        "description": "Download credit sale invoice with terms",
                     },
                     {
                         "id": "cmd_iou",
-                        "title": "🤝 Digital IOU",
-                        "description": "View & forward customer credit IOU notice",
+                        "title": "🤝 Customer IOU Link",
+                        "description": "1-tap WhatsApp debt forward link",
                     },
                 ],
             },
@@ -224,13 +224,13 @@ class CommandRouter:
                 "rows": [
                     {
                         "id": "cmd_statement",
-                        "title": "🏛️ Financial Statement",
-                        "description": "Download 2-page bank underwriting report",
+                        "title": "🏛️ Bank Statement PDF",
+                        "description": "Download 2-page institutional underwriting PDF",
                     },
                     {
                         "id": "cmd_score",
-                        "title": "🏆 Credit Score",
-                        "description": "Check credit score (300-850) & loan streak",
+                        "title": "🏆 Loan Credit Score",
+                        "description": "Check 300-850 score & 30-day streak",
                     },
                 ],
             },
@@ -240,17 +240,17 @@ class CommandRouter:
                     {
                         "id": "cmd_sales",
                         "title": "📈 Today's Sales",
-                        "description": "Real-time daily revenue, profit & margins",
+                        "description": "Daily revenue, profit & cash collections",
                     },
                     {
                         "id": "cmd_debtors",
-                        "title": "👥 Customer Debtors",
-                        "description": "Table of who owes you & balances",
+                        "title": "👥 Debtors Table",
+                        "description": "Active customer debt balances",
                     },
                     {
                         "id": "cmd_stock",
                         "title": "📦 Stock Inventory",
-                        "description": "Check stock on hand & low stock alerts",
+                        "description": "Stock on hand & low-stock alerts",
                     },
                 ],
             },
@@ -259,13 +259,13 @@ class CommandRouter:
                 "rows": [
                     {
                         "id": "cmd_drive",
-                        "title": "🔗 Google Drive",
-                        "description": "Connect or check automated cloud backups",
+                        "title": "🔗 Google Drive Backup",
+                        "description": "Automated cloud archive setup",
                     },
                     {
                         "id": "cmd_chart",
                         "title": "📊 Financial Chart",
-                        "description": "Visual trend chart & dashboard link",
+                        "description": "Visual 7-day revenue trend chart",
                     },
                 ],
             },
@@ -303,21 +303,27 @@ class CommandRouter:
             )
             if is_credit_only:
                 t_stmt = t_stmt.where(Transaction.is_credit.is_(True))
+            else:
+                t_stmt = t_stmt.where(Transaction.is_credit.is_(False))
             t_stmt = t_stmt.order_by(Transaction.occurred_at.desc()).limit(1)
 
             t_res = await db.execute(t_stmt)
             target_tx = t_res.scalar_one_or_none()
 
-            if not target_tx and is_credit_only:
-                msg = "ℹ️ No confirmed credit sales found in your records to generate an invoice for."
+            if not target_tx:
+                if is_credit_only:
+                    msg = "ℹ️ No confirmed credit sales found to generate an invoice for. (Record one by texting e.g. *'Emeka bought 2 bags on credit for ₦30k'*)."
+                else:
+                    msg = "ℹ️ No confirmed cash sales found to generate a receipt for. (Your latest sale may be a credit sale — use *'/invoice'* or select *Credit Invoice* to download it, or text *'Sold 1 item for ₦5,000 cash'*)."
                 send_res = await self.whatsapp.send_text(phone, msg)
                 await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
                 return
 
             pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
-                db, business_id=business.id, transaction_id=target_tx.id if target_tx else None
+                db, business_id=business.id, transaction_id=target_tx.id, credit_only=is_credit_only
             )
-            caption = f"📄 {'Invoice' if tx.is_credit else 'Receipt'} #{filename.replace('.pdf', '')} - {business.name}"
+            doc_type = "Credit Invoice" if tx.is_credit else "Sales Receipt"
+            caption = f"📄 {doc_type} #{filename.replace('.pdf', '')} - {business.name}"
             send_res = await self.whatsapp.send_document_bytes(phone, pdf_bytes, filename=filename, caption=caption)
             await self.ledger.record_outbound_message(db, business.id, phone, f"[Sent document {filename}]", send_res, user_id=user.id)
         except Exception as exc:
