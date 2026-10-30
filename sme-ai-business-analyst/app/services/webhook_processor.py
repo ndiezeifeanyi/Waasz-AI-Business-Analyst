@@ -641,10 +641,17 @@ class WhatsAppWebhookProcessor:
                 await db.flush()
             return
 
-        # Check for receipt request button or keyword
+        # Check for receipt or IOU request button or keyword
         interactive_id = parsed.interactive_reply_id or ""
         lower_text = source_text.strip().lower()
-        if interactive_id.startswith("receipt_") or lower_text in {"send receipt", "receipt", "📄 send receipt"}:
+        is_receipt_request = (
+            interactive_id.startswith("receipt_")
+            or lower_text in {"send receipt", "receipt", "📄 send receipt", "iou", "send iou", "invoice", "send invoice"}
+            or ("receipt" in lower_text and any(w in lower_text for w in ["send", "where", "get", "give", "show", "see", "pdf", "my", "the", "even"]))
+            or ("iou" in lower_text and any(w in lower_text for w in ["send", "where", "get", "give", "show", "see", "pdf", "my", "the", "even"]))
+            or ("invoice" in lower_text and any(w in lower_text for w in ["send", "where", "get", "give", "show", "see", "pdf", "my", "the", "even"]))
+        )
+        if is_receipt_request:
             target_tx_id = None
             if interactive_id.startswith("receipt_"):
                 try:
