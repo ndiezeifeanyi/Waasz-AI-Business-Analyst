@@ -441,8 +441,13 @@ class BusinessHealthProfilePdfService:
         if recent_txs:
             for tx in recent_txs:
                 occ_date = tx.occurred_at.strftime("%d %b %Y") if tx.occurred_at else "N/A"
-                tx_type = "Credit Sale" if tx.is_credit else tx.transaction_type.capitalize()
-                item_desc = (tx.metadata_ or {}).get("item_name") or (tx.metadata_ or {}).get("description") or "Retail transaction"
+                tx_type = "Credit Sale" if getattr(tx, "is_credit", False) else (getattr(tx, "transaction_type", "sale") or "sale").capitalize()
+                item_desc = (
+                    getattr(tx, "item_name", None)
+                    or getattr(tx, "description", None)
+                    or (getattr(tx, "extra_metadata", None) or {}).get("item_name")
+                    or "Retail transaction"
+                )
                 sample_rows.append([
                     Paragraph(occ_date, cell_normal),
                     Paragraph(tx_type, cell_normal),
