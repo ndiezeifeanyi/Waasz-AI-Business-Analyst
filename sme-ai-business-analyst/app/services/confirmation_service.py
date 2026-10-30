@@ -267,11 +267,12 @@ class ConfirmationService:
                         f"💳 *Settlement Details:* {bank_info}\n\n"
                         f"Please quote Ref #{ref_code} as transfer remark upon payment."
                     )
-                    wa_link = f"https://wa.me/{norm_phone}?text={urllib.parse.quote(concise_notice)}"
+                    from app.utils.url_helper import get_short_iou_url
+                    short_link = get_short_iou_url(ref_code)
                     base_text += (
                         f"\n📲 *Deliver IOU to {cust_name}:*\n"
                         f"Tap below to send this official IOU notice directly to {cust_name} on WhatsApp:\n"
-                        f"👉 {wa_link}\n\n"
+                        f"👉 {short_link}\n\n"
                         f"(Or text 'Send IOU to {cust_name}' to dispatch via automated registry)"
                     )
                 else:

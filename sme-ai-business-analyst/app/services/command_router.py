@@ -415,9 +415,9 @@ class CommandRouter:
         )
 
         if cust_phone:
-            norm_phone = notifier.normalize_phone(cust_phone)
-            wa_link = f"https://wa.me/{norm_phone}?text={urllib.parse.quote(debtor_notice_text)}"
-            merchant_summary += f"📲 *Forward to {cust_name} on WhatsApp (1-Tap):*\n👉 {wa_link}\n\n"
+            from app.utils.url_helper import get_short_iou_url
+            short_link = get_short_iou_url(ref_code)
+            merchant_summary += f"📲 *Forward to {cust_name} on WhatsApp (1-Tap):*\n👉 {short_link}\n\n"
         else:
             merchant_summary += f"💡 *Tip:* Text *'{cust_name} phone is 070...' to generate an instant 1-tap WhatsApp link.\n\n"
 

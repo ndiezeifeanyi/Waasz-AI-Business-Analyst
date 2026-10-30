@@ -248,6 +248,8 @@ class DebtNotifierService:
             send_res.success,
         )
 
+        from app.utils.url_helper import get_short_iou_url
+        short_link = get_short_iou_url(ref_code)
         wa_link = f"https://wa.me/{debtor_phone}?text={urllib.parse.quote(notice_body)}"
 
         return {
@@ -259,6 +261,7 @@ class DebtNotifierService:
             "ref_code": ref_code,
             "notice_text": notice_body,
             "wa_link": wa_link,
+            "short_link": short_link,
             "success": send_res.success,
             "error": send_res.error_message,
         }
@@ -340,7 +343,7 @@ class DebtNotifierService:
             f"• *Ref Code:* #{res['ref_code']}\n\n"
             f"📲 *1-Tap Direct WhatsApp Delivery:*\n"
             f"Because WhatsApp blocks automated messages to contacts that haven't messaged this business line first (Meta 24h Policy), tap below to send the official IOU straight from your WhatsApp with 100% guaranteed delivery:\n"
-            f"👉 {res['wa_link']}\n\n"
+            f"👉 {res.get('short_link') or res['wa_link']}\n\n"
             f"📄 *Notice Content:*\n"
             f"{res['notice_text']}"
         )
