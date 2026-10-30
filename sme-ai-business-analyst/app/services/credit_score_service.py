@@ -118,4 +118,13 @@ class CreditScoreService:
             "expenses_30d": exp_vol,
             "debt_settlement_ratio": round(debt_ratio * 100, 1),
             "unmatured_receivables": float(sum((d.amount for d in all_debts if d.status != "paid" and (not d.due_date or d.due_date >= now)), Decimal("0"))),
+            "base_points": 300,
+            "consistency_pts": round(consistency_pts),
+            "debt_pts": round(debt_pts),
+            "margin_pts": round(margin_pts),
+            "expense_pts": round(expense_pts),
+            "consistency_ratio": round(consistency_ratio * 100, 1),
+            "debt_ratio": round(debt_ratio * 100, 1),
+            "margin_ratio": round(margin_ratio * 100, 1),
+            "expense_ratio": 100.0 if has_expenses else 27.3,
         }

@@ -968,7 +968,7 @@ class WhatsAppWebhookProcessor:
                 pdf_bytes, filename = await profile_svc.generate_health_profile_pdf(db, business.id)
                 score_data = await score_svc.calculate_score(db, business.id)
                 
-                caption = f"📄 Official Business Health & Credit Profile - {business.name}"
+                caption = f"Business Financial Health Report - {business.name}"
                 send_res = await self.whatsapp.send_document_bytes(
                     parsed.from_phone,
                     pdf_bytes,
@@ -980,15 +980,15 @@ class WhatsAppWebhookProcessor:
                 )
 
                 summary_text = (
-                    f"📊 *Business Financial Health Report Generated*\n\n"
-                    f"🏪 Store: *{business.name}*\n"
-                    f"📈 *Credit Score:* *{score_data['score']} / 850* ({score_data['tier']})\n"
-                    f"🎖️ *Ledger Activity:* {score_data['badge']}\n\n"
-                    f"📅 *Logging Consistency:* {score_data['active_days_last_30']}/30 days logged\n"
-                    f"💰 *30-Day Sales:* ₦{score_data['sales_30d']:,.0f}\n"
-                    f"💸 *30-Day Expenses:* ₦{score_data['expenses_30d']:,.0f}\n"
-                    f"🤝 *Receivables Recovery Ratio:* {score_data['debt_settlement_ratio']}%\n\n"
-                    "📄 Your 2-page Business Financial Health Report PDF is attached above."
+                    f"*Business Financial Health Report Generated*\n\n"
+                    f"Merchant: *{business.name}*\n"
+                    f"Credit Underwriting Score: *{score_data['score']} / 850* ({score_data['tier']})\n"
+                    f"Operational Status: {score_data['badge']}\n\n"
+                    f"• 30-Day Gross Revenue: ₦{score_data['sales_30d']:,.0f}\n"
+                    f"• 30-Day Operating Expenses: ₦{score_data['expenses_30d']:,.0f}\n"
+                    f"• Receivables Recovery Ratio: {score_data['debt_settlement_ratio']}%\n"
+                    f"• Ledger Consistency: {score_data['active_days_last_30']}/30 days logged\n\n"
+                    "Your 2-page institutional Financial Health Report PDF is attached above."
                 )
                 text_res = await self.whatsapp.send_text(parsed.from_phone, summary_text)
                 await self.ledger.record_outbound_message(
