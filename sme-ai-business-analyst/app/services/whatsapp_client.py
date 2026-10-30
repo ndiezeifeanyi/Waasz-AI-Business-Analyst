@@ -157,6 +157,25 @@ class WhatsAppClient:
             {"type": "reply", "reply": {"id": b_id, "title": b_title[:20]}}
             for b_id, b_title in buttons[:3]
         ]
+
+        # Meta strictly enforces a 1024-character maximum on interactive button body text.
+        # If the message body exceeds 1024 chars, send the main text first, followed by a button prompt.
+        if len(body) > 1024:
+            text_res = await self.send_text(to_phone, body)
+            if not text_res.success:
+                return text_res
+            prompt_payload = {
+                "messaging_product": "whatsapp",
+                "to": to_phone,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {"text": "📄 Tap below to view your official document:"},
+                    "action": {"buttons": btn_payloads},
+                },
+            }
+            return await self._post(prompt_payload)
+
         payload = {
             "messaging_product": "whatsapp",
             "to": to_phone,
@@ -167,7 +186,12 @@ class WhatsAppClient:
                 "action": {"buttons": btn_payloads},
             },
         }
-        return await self._post(payload)
+        res = await self._post(payload)
+        # Automatic fallback: If Meta returns parameter error (e.g. #131009), deliver as plain text
+        if not res.success and ("131009" in (res.error_message or "") or "Parameter" in (res.error_message or "")):
+            logger.warning("send_interactive_buttons failed with %s; automatically falling back to send_text", res.error_message)
+            return await self.send_text(to_phone, body)
+        return res
 
     async def upload_media(self, file_content: bytes, mime_type: str) -> str | None:
         """Upload media to Meta and return the media ID."""

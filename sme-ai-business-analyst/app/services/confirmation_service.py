@@ -258,16 +258,16 @@ class ConfirmationService:
                     notifier = DebtNotifierService()
                     norm_phone = notifier.normalize_phone(cust_phone)
                     bank_info = notifier._get_merchant_bank_info(biz) if biz else f"Account: {biz.name if biz else 'Merchant'}"
-                    notice_text = notifier.build_notice_text(
-                        stage=1,
-                        debtor_name=cust_name,
-                        biz_name=biz.name if biz else "Merchant",
-                        amount=transactions[0].amount or Decimal("0"),
-                        due_date_str=due_str,
-                        bank_info=bank_info,
-                        ref_code=ref_code,
+                    concise_notice = (
+                        f"🏛️ *WAASZ VERIFIED MERCHANT REGISTRY*\n"
+                        f"IOU Ref: #{ref_code}\n\n"
+                        f"Dear {cust_name},\n"
+                        f"This confirms your credit purchase of {item_desc} ({amt_fmt}) from {biz.name if biz else 'the merchant'}.\n\n"
+                        f"📅 *Due Date:* {due_str}\n"
+                        f"💳 *Settlement Details:* {bank_info}\n\n"
+                        f"Please quote Ref #{ref_code} as transfer remark upon payment."
                     )
-                    wa_link = f"https://wa.me/{norm_phone}?text={urllib.parse.quote(notice_text)}"
+                    wa_link = f"https://wa.me/{norm_phone}?text={urllib.parse.quote(concise_notice)}"
                     base_text += (
                         f"\n📲 *Deliver IOU to {cust_name}:*\n"
                         f"Tap below to send this official IOU notice directly to {cust_name} on WhatsApp:\n"
