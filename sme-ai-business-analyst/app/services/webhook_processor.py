@@ -47,6 +47,7 @@ from app.services.unified_report_service import UnifiedReportService
 from app.services.voice_service import VoiceService
 from app.services.whatsapp_client import WhatsAppClient
 from app.services.whatsapp_parser import parse_webhook_payload, parse_webhook_statuses
+from app.services.command_router import CommandRouter
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,7 @@ class WhatsAppWebhookProcessor:
         self.invites = invites or InviteCodeService()
         self.access_control = access_control or AccessControlService(invite_service=self.invites)
         self.staff = staff or StaffService()
+        self.command_router = CommandRouter(whatsapp=self.whatsapp, ledger=self.ledger)
         self.agent = agent or AgentService(
             ledger=self.ledger,
             extractor=self.extractor,
@@ -641,8 +643,25 @@ class WhatsAppWebhookProcessor:
                 await db.flush()
             return
 
-        # Check for receipt or IOU request button or keyword
+        # Early Fast-Path: Quick Command Router & Interactive Action Menu (/menu, /receipt, /invoice, /iou, /statement, /score, etc.)
         interactive_id = parsed.interactive_reply_id or ""
+        handled_cmd = await self.command_router.handle_command(
+            db=db,
+            business=business,
+            user=user,
+            phone=parsed.from_phone,
+            source_text=source_text,
+            interactive_id=interactive_id,
+        )
+        if handled_cmd:
+            inbound.status = "processed"
+            if hasattr(db, "commit"):
+                await db.commit()
+            elif hasattr(db, "flush"):
+                await db.flush()
+            return
+
+        # Check for receipt or IOU request button or keyword
         lower_text = source_text.strip().lower()
         is_receipt_request = (
             interactive_id.startswith("receipt_")

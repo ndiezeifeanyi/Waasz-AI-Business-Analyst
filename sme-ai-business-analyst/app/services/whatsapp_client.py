@@ -193,6 +193,54 @@ class WhatsAppClient:
             return await self.send_text(to_phone, body)
         return res
 
+    async def send_interactive_list(
+        self,
+        to_phone: str,
+        body: str,
+        button_label: str,
+        sections: list[dict],
+        header: str | None = None,
+        footer: str | None = None,
+    ) -> WhatsAppSendResult:
+        """Send a native WhatsApp interactive list message (drawer with up to 10 options)."""
+        if not self._is_configured:
+            return WhatsAppSendResult(
+                skipped=True, error_message="WhatsApp credentials are not set"
+            )
+        action_payload: dict = {
+            "button": button_label[:20],
+            "sections": sections,
+        }
+        interactive_payload: dict = {
+            "type": "list",
+            "body": {"text": body[:1024]},
+            "action": action_payload,
+        }
+        if header:
+            interactive_payload["header"] = {"type": "text", "text": header[:60]}
+        if footer:
+            interactive_payload["footer"] = {"text": footer[:60]}
+
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_phone,
+            "type": "interactive",
+            "interactive": interactive_payload,
+        }
+        res = await self._post(payload)
+        if not res.success:
+            logger.warning("send_interactive_list failed (%s); falling back to formatted text menu", res.error_message)
+            lines = [f"*{header}*" if header else "*WAASZ QUICK MENU*", body, ""]
+            for sec in sections:
+                lines.append(f"*{sec.get('title', '')}*")
+                for r in sec.get("rows", []):
+                    lines.append(f"• *{r.get('title', '')}* — {r.get('description', '')}")
+                lines.append("")
+            if footer:
+                lines.append(f"_{footer}_")
+            return await self.send_text(to_phone, "\n".join(lines).strip())
+        return res
+
     async def upload_media(self, file_content: bytes, mime_type: str) -> str | None:
         """Upload media to Meta and return the media ID."""
         if not self._is_configured:
