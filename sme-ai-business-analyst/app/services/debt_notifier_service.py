@@ -169,8 +169,40 @@ class DebtNotifierService:
             ref_code=ref_code,
         )
 
-        # Dispatch via WhatsApp to the debtor
-        send_res = await self.whatsapp.send_text(debtor_phone, notice_body)
+        # Dispatch via WhatsApp to the debtor:
+        # First attempt via official Meta Utility Template (bypasses 24h window).
+        # Fall back to direct text if inside 24h or if template is not yet registered.
+        template_components = [
+            {
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": ref_code},
+                    {"type": "text", "text": customer.name},
+                    {"type": "text", "text": format_naira(debt.amount)},
+                    {"type": "text", "text": biz.name},
+                    {"type": "text", "text": due_date_str},
+                    {"type": "text", "text": bank_info},
+                ],
+            }
+        ]
+        send_res = await self.whatsapp.send_template(
+            debtor_phone,
+            template_name="merchant_credit_iou_v1",
+            language_code="en",
+            components=template_components,
+        )
+        if not send_res.success and "132001" in str(send_res.error_message):
+            send_res = await self.whatsapp.send_template(
+                debtor_phone,
+                template_name="merchant_credit_iou_v1",
+                language_code="en_US",
+                components=template_components,
+            )
+
+        # Fallback to direct text if template is unavailable or rejected
+        if not send_res.success:
+            logger.info("Template merchant_credit_iou_v1 not available (%s); falling back to direct text", send_res.error_message)
+            send_res = await self.whatsapp.send_text(debtor_phone, notice_body)
         
         # Record into whatsapp_messages table for full audit and visibility
         try:
