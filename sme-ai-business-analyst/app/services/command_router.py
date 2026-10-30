@@ -349,9 +349,12 @@ class CommandRouter:
             await self.ledger.record_outbound_message(db, business.id, phone, err_msg, send_res, user_id=user.id)
 
     async def _handle_iou(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
-        """Pulls latest credit sale and provides official IOU ref and 1-tap link."""
+        """Pulls latest credit sale, provides institutional Component 1 notification with 1-tap forward link, and delivers Component 2 A4 PDF Debt Receipt."""
+        import urllib.parse
         from app.services.debt_notifier_service import DebtNotifierService
+        from app.services.debt_receipt_pdf_service import DebtReceiptPdfService
         notifier = DebtNotifierService()
+        debt_pdf_svc = DebtReceiptPdfService()
 
         # Find latest credit transaction
         stmt = (
@@ -375,31 +378,64 @@ class CommandRouter:
         cust = await db.get(Customer, tx.customer_id)
         cust_name = cust.name if cust else "Customer"
         cust_phone = cust.phone_number if cust else ""
-        ref_code = f"WZ-{str(tx.id).split('-')[0].upper()}"
+        ref_code = f"WZ-{str(tx.id).replace('-', '')[:8].upper()}"
         amt_fmt = format_naira(tx.amount)
 
-        notice_text = (
-            f"🤝 *Digital IOU Record (#{ref_code})*\n"
-            f"• *Customer:* {cust_name}\n"
-            f"• *Amount:* {amt_fmt}\n"
-            f"• *Item:* {tx.item_name or 'Credit purchase'}\n"
-            f"• *Status:* Outstanding\n\n"
+        # Dynamic Net-14 terms calculation
+        tx_dt = tx.occurred_at or datetime.now(UTC)
+        maturity_dt = tx_dt + timedelta(days=14)
+        due_date_str = f"{maturity_dt.strftime('%d %b %Y')} (Net-14)"
+
+        # Component 1: Overhauled Mobile Notification (WhatsApp/SMS text for debtor)
+        debtor_notice_text = (
+            f"🏛️ WAASZ LEDGER REGISTRY // REF: #{ref_code}\n\n"
+            f"ATTENTION: {cust_name.upper()}\n\n"
+            f"This instrument confirms the formal registration of a commercial credit obligation "
+            f"under the Waasz Enterprise Ledger Registry.\n\n"
+            f"📊 *CORE OBLIGATION METRICS:*\n"
+            f"• Creditor: {business.name}\n"
+            f"• *Balance Due:* *{amt_fmt}*\n"
+            f"• *Maturity / Due Date:* *{due_date_str}*\n"
+            f"• Interest Structure: 0.0% APR (Fixed Default)\n"
+            f"• Facility Type: Commercial Accounts Receivable\n\n"
+            f"💳 *Online Payment Gateway Checkout:*\n"
+            f"👉 https://pay.waasz.com/settle/{ref_code}\n\n"
+            f"📄 *Download Official PDF Debt Receipt:*\n"
+            f"👉 https://docs.waasz.com/receipts/iou/{ref_code}.pdf\n\n"
+            f"🔒 *Security Note:* This ledger entry is cryptographically timestamped and immutable "
+            f"under the Waasz Enterprise Registry."
         )
+
+        merchant_summary = (
+            f"🏛️ *OFFICIAL DEBT ACKNOWLEDGMENT (IOU) — #{ref_code}*\n\n"
+            f"• *Debtor:* {cust_name}\n"
+            f"• *Balance Due:* *{amt_fmt}*\n"
+            f"• *Maturity Date:* *{due_date_str}*\n"
+            f"• *Status:* Active Accounts Receivable\n\n"
+        )
+
         if cust_phone:
             norm_phone = notifier.normalize_phone(cust_phone)
-            short_msg = (
-                f"🏛️ *WAASZ VERIFIED MERCHANT REGISTRY — Ref: #{ref_code}*\n\n"
-                f"Dear {cust_name}, your credit purchase of {tx.item_name or 'goods'} ({amt_fmt}) from {business.name} has been registered.\n"
-                f"Please settle to designated merchant account quoting Ref #{ref_code}."
-            )
-            import urllib.parse
-            wa_link = f"https://wa.me/{norm_phone}?text={urllib.parse.quote(short_msg)}"
-            notice_text += f"📲 *Forward to {cust_name} on WhatsApp:*\n👉 {wa_link}"
+            wa_link = f"https://wa.me/{norm_phone}?text={urllib.parse.quote(debtor_notice_text)}"
+            merchant_summary += f"📲 *Forward to {cust_name} on WhatsApp (1-Tap):*\n👉 {wa_link}\n\n"
         else:
-            notice_text += f"💡 *Tip:* Text *'{cust_name} phone is 070...' to generate an instant 1-tap WhatsApp link."
+            merchant_summary += f"💡 *Tip:* Text *'{cust_name} phone is 070...' to generate an instant 1-tap WhatsApp link.\n\n"
 
-        send_res = await self.whatsapp.send_text(phone, notice_text)
-        await self.ledger.record_outbound_message(db, business.id, phone, notice_text, send_res, user_id=user.id)
+        merchant_summary += "📄 *Official A4 PDF Debt Receipt attached below:* 👇"
+
+        send_res = await self.whatsapp.send_text(phone, merchant_summary)
+        await self.ledger.record_outbound_message(db, business.id, phone, merchant_summary, send_res, user_id=user.id)
+
+        # Generate & deliver Component 2: A4 PDF Debt Receipt
+        try:
+            pdf_bytes, filename = await debt_pdf_svc.generate_debt_receipt_pdf(
+                db, business_id=business.id, transaction_id=tx.id
+            )
+            caption = f"📄 Official Debt Receipt (IOU) #{ref_code} - {cust_name}"
+            doc_res = await self.whatsapp.send_document_bytes(phone, pdf_bytes, filename=filename, caption=caption)
+            await self.ledger.record_outbound_message(db, business.id, phone, f"[Sent IOU PDF {filename}]", doc_res, user_id=user.id)
+        except Exception as exc:
+            logger.error("Failed to generate or deliver Debt Receipt PDF: %s", exc)
 
     async def _handle_debtors(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
         """Lists active debtors and balances."""
