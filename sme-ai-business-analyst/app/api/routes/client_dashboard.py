@@ -48,7 +48,6 @@ def render_template(
 
 
 @router.get("/dashboard/{token}", response_class=HTMLResponse)
-@router.get("/webhooks/whatsapp/reports/dashboard/{token}", response_class=HTMLResponse)
 async def view_dashboard(
     request: Request,
     token: str,
@@ -80,7 +79,6 @@ async def view_dashboard(
     )
 
 @router.get("/data/{token}")
-@router.get("/webhooks/whatsapp/reports/data/{token}")
 async def get_dashboard_data(
     token: str,
     days: int = Query(default=30, ge=1, le=365),

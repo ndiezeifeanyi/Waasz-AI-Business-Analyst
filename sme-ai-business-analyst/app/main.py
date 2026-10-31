@@ -7,7 +7,7 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 
 from app.api.routes import admin, client_dashboard, google_drive, health, shortlinks, whatsapp
 from app.core.config import settings
@@ -52,6 +52,15 @@ def create_app() -> FastAPI:
     app.include_router(client_dashboard.router)
     app.include_router(google_drive.router)
     app.include_router(shortlinks.router)
+ 
+    # Backward compatibility redirect for legacy webhook-prefixed dashboard links
+    @app.get("/webhooks/whatsapp/reports/dashboard/{token}", include_in_schema=False)
+    async def legacy_dashboard_redirect(token: str):
+        return RedirectResponse(url=f"/reports/dashboard/{token}", status_code=302)
+
+    @app.get("/webhooks/whatsapp/reports/data/{token}", include_in_schema=False)
+    async def legacy_dashboard_data_redirect(token: str):
+        return RedirectResponse(url=f"/reports/data/{token}", status_code=302)
 
     # Root info route with webhook handshake fallback
     @app.get("/", tags=["info"])
