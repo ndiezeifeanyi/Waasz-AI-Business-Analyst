@@ -583,7 +583,10 @@ class WhatsAppWebhookProcessor:
         else:
             action = normalize_confirmation_reply(parsed.body, parsed.interactive_reply_id)
             is_receipt_action = (parsed.interactive_reply_id or "").startswith("receipt_") or (parsed.body or "").strip().lower() in {"send receipt", "receipt", "📄 send receipt"}
-            is_command_action = (parsed.interactive_reply_id or "").startswith("cmd_")
+            is_command_action = (
+                (parsed.interactive_reply_id or "").startswith("cmd_")
+                or (parsed.interactive_reply_id or "").startswith("stmt_")
+            )
             if not is_receipt_action and not is_command_action and (parsed.interactive_reply_id or action != "unknown"):
                 logger.info(
                     "Idempotency: confirmation reply %s (%s) received for already-resolved or absent pending confirmation. Silently no-oping.",
