@@ -820,6 +820,17 @@ class ReceiptService:
         debts = list(debt_res.scalars().all())
         total_receivables = sum(Decimal(str(d.amount or 0)) for d in debts)
 
+        coverage_days = days
+        earliest_str = None
+        if transactions:
+            oldest_tx = transactions[-1]
+            if oldest_tx.occurred_at:
+                oldest_date = oldest_tx.occurred_at.date()
+                today_date = datetime.now(UTC).date()
+                actual_span = (today_date - oldest_date).days + 1
+                coverage_days = min(days, max(1, actual_span))
+                earliest_str = oldest_tx.occurred_at.strftime("%d %b %Y")
+
         summary_dict = {
             "total_sales": float(total_sales),
             "total_expenses": float(total_expenses),
@@ -828,6 +839,9 @@ class ReceiptService:
             "expense_count": expense_count,
             "total_receivables": float(total_receivables),
             "total_transactions": len(transactions),
+            "requested_days": days,
+            "coverage_days": coverage_days,
+            "earliest_date": earliest_str,
         }
 
         # 4. Build ReportLab PDF
@@ -879,7 +893,11 @@ class ReceiptService:
         elements.append(Spacer(1, 6))
         elements.append(Paragraph("<b>OFFICIAL STATEMENT OF BUSINESS ACTIVITY</b>", ParagraphStyle("SubDoc", parent=title_style, fontSize=12, leading=16, textColor=colors.HexColor("#0f172a"))))
         now_str = datetime.now(UTC).strftime("%B %d, %Y")
-        elements.append(Paragraph(f"Reporting Period: Past {days} Days • Issued: {now_str} • Verified by Waasz AI", sub_style))
+        if coverage_days < days and coverage_days > 0 and earliest_str:
+            period_line = f"Reporting Period: Past {days} Days ({coverage_days} Days of Available Records from {earliest_str}) • Issued: {now_str} • Verified by Waasz AI"
+        else:
+            period_line = f"Reporting Period: Past {days} Days • Issued: {now_str} • Verified by Waasz AI"
+        elements.append(Paragraph(period_line, sub_style))
         elements.append(Spacer(1, 12))
 
         # KPI Metrics Table
@@ -925,7 +943,8 @@ class ReceiptService:
             ]
         ]
 
-        for tx in transactions[:60]: # Show up to 60 transactions
+        display_limit = 120
+        for tx in transactions[:display_limit]:
             date_str = tx.occurred_at.strftime("%Y-%m-%d %H:%M") if tx.occurred_at else "-"
             type_label = tx.transaction_type.upper()
             desc = (tx.description or tx.item_name or "-")[:35]

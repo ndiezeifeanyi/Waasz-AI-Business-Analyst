@@ -61,7 +61,7 @@ class CommandRouter:
         # Normalize slash command triggers
         cmd_name = ""
         cmd_args = ""
-        if raw_cmd.startswith("cmd_"):
+        if raw_cmd.startswith("cmd_") or raw_cmd.startswith("stmt_"):
             cmd_name = raw_cmd
         elif raw_cmd.startswith("/"):
             parts = raw_cmd[1:].split(maxsplit=1)
@@ -117,10 +117,21 @@ class CommandRouter:
 
         # -------------------------------------------------------------------
         # -------------------------------------------------------------------
-        # 6. /statement -> 30-Day Official Verified Business Statement PDF
+        # 6. /statement -> Interactive Period Picker or Direct Days
         # -------------------------------------------------------------------
+        if cmd_name.startswith("stmt_"):
+            day_part = cmd_name.replace("stmt_", "").strip()
+            days = int(day_part) if day_part.isdigit() else 30
+            await self._handle_statement(db, business, user, phone, days=days)
+            return True
+
         if cmd_name in {"statement", "stmt", "downloadstatement", "accountstatement", "cmd_statement"}:
-            await self._handle_statement(db, business, user, phone)
+            if cmd_args:
+                digits = "".join(filter(str.isdigit, cmd_args))
+                days = int(digits) if digits else 30
+                await self._handle_statement(db, business, user, phone, days=days)
+            else:
+                await self._send_statement_picker(db, business, user, phone)
             return True
 
         # -------------------------------------------------------------------
@@ -483,26 +494,101 @@ class CommandRouter:
         send_res = await self.whatsapp.send_text(phone, summary)
         await self.ledger.record_outbound_message(db, business.id, phone, summary, send_res, user_id=user.id)
 
-    async def _handle_statement(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
-        """Generates and delivers official 30-Day Verified Statement PDF and text ledger."""
+    async def _send_statement_picker(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
+        """Sends the native WhatsApp interactive list drawer to choose statement timeframe."""
+        sections = [
+            {
+                "title": "📅 Select Timeframe",
+                "rows": [
+                    {
+                        "id": "stmt_30",
+                        "title": "📅 Last 30 Days",
+                        "description": "Standard 1-month operational statement",
+                    },
+                    {
+                        "id": "stmt_60",
+                        "title": "📅 Last 60 Days",
+                        "description": "2-month cash flow & sales summary",
+                    },
+                    {
+                        "id": "stmt_90",
+                        "title": "📅 Last 90 Days",
+                        "description": "Quarterly institutional verification",
+                    },
+                    {
+                        "id": "stmt_180",
+                        "title": "📅 Last 180 Days",
+                        "description": "6-month half-year financial statement",
+                    },
+                    {
+                        "id": "stmt_365",
+                        "title": "📅 Last 365 Days",
+                        "description": "Annual statement up to all available records",
+                    },
+                ],
+            }
+        ]
+
+        body_text = (
+            f"🏛️ *Official Business Statement for {business.name or 'Your Business'}*\n\n"
+            "Choose the timeframe you would like your verified PDF statement to cover:\n\n"
+            "• *30 Days:* Standard monthly ledger\n"
+            "• *60 / 90 Days:* Multi-month & quarterly review\n"
+            "• *180 / 365 Days:* Half-year & annual audit records\n\n"
+            "_Tip: You can also type any custom number of days directly, e.g. `/statement 45`._"
+        )
+
+        send_res = await self.whatsapp.send_interactive_list(
+            to_phone=phone,
+            body=body_text,
+            button_label="Select Period",
+            sections=sections,
+            header="📑 STATEMENT TIMEFRAME",
+            footer="Official verified business ledger",
+        )
+        await self.ledger.record_outbound_message(db, business.id, phone, "[Sent Statement Picker]", send_res, user_id=user.id)
+
+    async def _handle_statement(self, db: AsyncSession, business: Business, user: User, phone: str, days: int = 30) -> None:
+        """Generates and delivers official Verified Statement PDF and text ledger for requested days."""
         receipt_svc = ReceiptService()
         try:
-            pdf_bytes, filename, summary = await receipt_svc.generate_statement_pdf(db, business.id, days=30)
+            pdf_bytes, filename, summary = await receipt_svc.generate_statement_pdf(db, business.id, days=days)
+            total_tx = summary.get("total_transactions", 0)
+
+            if total_tx == 0:
+                msg = (
+                    f"ℹ️ *No Transactions Recorded Yet*\n\n"
+                    f"Your business *{business.name}* does not have any confirmed sales or expenses recorded yet.\n\n"
+                    f"Once you log your first transaction, your official {days}-day statement will be available for instant PDF download!"
+                )
+                send_res = await self.whatsapp.send_text(phone, msg)
+                await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
+                return
+
             caption = f"📑 Official Statement of Business Activity - {business.name}"
             doc_res = await self.whatsapp.send_document_bytes(phone, pdf_bytes, filename=filename, caption=caption)
             await self.ledger.record_outbound_message(db, business.id, phone, f"[Sent statement PDF {filename}]", doc_res, user_id=user.id)
 
             # Follow up with concise text summary
             now = datetime.now(UTC)
-            start_date = now - timedelta(days=30)
+            coverage_days = summary.get("coverage_days", days)
+            earliest_str = summary.get("earliest_date")
+
+            if coverage_days < days and earliest_str:
+                period_line = f"{earliest_str} – {now.strftime('%d %b %Y')} ({coverage_days} Days of Available Records)"
+            else:
+                start_date = now - timedelta(days=days)
+                period_line = f"{start_date.strftime('%d %b')} – {now.strftime('%d %b %Y')} ({days} Days)"
+
             summary_msg = (
                 f"🏛️ *Official Business Statement Delivered*\n\n"
                 f"• Business: *{business.name}*\n"
-                f"• Period: {start_date.strftime('%d %b')} – {now.strftime('%d %b %Y')} (30 Days)\n"
+                f"• Requested Period: *{days} Days*\n"
+                f"• Record Coverage: {period_line}\n"
                 f"• Gross Sales: *{format_naira(Decimal(str(summary.get('total_sales', 0))))}* ({summary.get('sales_count', 0)} sales)\n"
                 f"• Operating Expenses: *{format_naira(Decimal(str(summary.get('total_expenses', 0))))}* ({summary.get('expense_count', 0)} expenses)\n"
                 f"• Net Profit: *{format_naira(Decimal(str(summary.get('net_profit', 0))))}*\n"
-                f"• Total Ledger Entries: *{summary.get('total_transactions', 0)}*\n\n"
+                f"• Total Ledger Entries: *{total_tx}*\n\n"
                 "📄 Your official cryptographically verified Statement PDF is attached above."
             )
             text_res = await self.whatsapp.send_text(phone, summary_msg)

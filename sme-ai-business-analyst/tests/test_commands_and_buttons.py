@@ -221,12 +221,33 @@ async def test_statement_pdf_delivery(setup_command_env):
     db = env["db"]
     mock_wa = env["mock_wa"]
 
+    # 1. /statement without args triggers the interactive timeframe picker
     handled = await env["router"].handle_command(db, env["business"], env["user"], env["phone"], "/statement")
     assert handled is True
+    assert len(mock_wa.sent_interactive_lists) >= 1
+    picker = mock_wa.sent_interactive_lists[-1]
+    stmt_rows = [r["id"] for s in picker["sections"] for r in s["rows"]]
+    assert "stmt_30" in stmt_rows
+    assert "stmt_90" in stmt_rows
+    assert "stmt_365" in stmt_rows
+
+    # 2. Tapping an option (e.g. stmt_90) delivers the PDF
+    mock_wa.sent_documents.clear()
+    handled_btn = await env["router"].handle_command(db, env["business"], env["user"], env["phone"], "", interactive_id="stmt_90")
+    assert handled_btn is True
     assert len(mock_wa.sent_documents) == 1
     doc = mock_wa.sent_documents[0]
     assert doc["filename"].endswith(".pdf")
     assert doc["size"] > 500
+
+    # 3. Direct typed command with custom days (/statement 365) delivers immediately
+    mock_wa.sent_documents.clear()
+    handled_direct = await env["router"].handle_command(db, env["business"], env["user"], env["phone"], "/statement 365")
+    assert handled_direct is True
+    assert len(mock_wa.sent_documents) == 1
+    doc_direct = mock_wa.sent_documents[0]
+    assert doc_direct["filename"].endswith(".pdf")
+    assert doc_direct["size"] > 500
 
 
 @pytest.mark.asyncio
