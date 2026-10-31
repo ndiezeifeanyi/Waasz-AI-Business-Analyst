@@ -763,8 +763,8 @@ class ReceiptService:
         days: int = 30,
     ) -> tuple[bytes, str, dict]:
         """
-        Builds an Official Statement of Business Activity (PDF) suitable for loan applications,
-        cooperatives, tax records, or bank reviews.
+        Builds an Official Statement of Business Activity (PDF) suitable for business records,
+        partnerships, auditing, tax filing, and institutional verification.
         Returns:
             (pdf_bytes, filename, summary_dict)
         """
@@ -972,7 +972,7 @@ class ReceiptService:
         cert_style = ParagraphStyle("Cert", parent=styles["Normal"], fontName="Helvetica", fontSize=7, textColor=colors.HexColor("#64748b"), alignment=1)
         elements.append(Paragraph(
             "<b>CERTIFIED SME TRANSACTION LEDGER</b> • Generated electronically by Waasz AI Business Analyst • "
-            "NDPA Compliant & Cryptographically Verified • Suitable for Banks, Cooperatives & Loan Underwriting.",
+            "NDPA Compliant & Cryptographically Verified Business Record.",
             cert_style
         ))
 

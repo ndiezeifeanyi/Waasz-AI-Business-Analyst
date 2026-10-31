@@ -248,7 +248,7 @@ class UnifiedReportService:
             user, cadence, curr_acts, prior_acts, goals, bi_evidence=bi_evidence
         )
 
-        # Attach Waasz Business Credit Score and 30-Day Loan-Readiness Streak
+        # Attach Waasz Business Credit Score and 30-Day Streak
         if user.business_id and cadence in {"daily", "weekly"}:
             try:
                 from app.services.credit_score_service import CreditScoreService
@@ -261,14 +261,14 @@ class UnifiedReportService:
                 tier_emoji = "🟢" if score_val >= 650 else ("🟡" if score_val >= 500 else "🔴")
 
                 score_badge = (
-                    f"\n\n🏆 WAASZ CREDIT SCORE & LOAN PROGRESS\n"
+                    f"\n\n🏆 WAASZ CREDIT SCORE & FINANCIAL HEALTH\n"
                     f"• Business Credit Score: {score_val}/850 [{tier} {tier_emoji}]\n"
-                    f"• 30-Day Bank Loan Streak: Day {streak} of 30 active\n"
+                    f"• 30-Day Record Streak: Day {streak} of 30 active\n"
                 )
                 if days_left > 0:
-                    score_badge += f"• ⏳ {days_left} more active logging days to unlock your Certified Bank Loan Profile!\n"
+                    score_badge += f"• ⏳ {days_left} more active logging days to complete your 30-day verified health profile!\n"
                 else:
-                    score_badge += f"• 🎉 Certified Bank Loan Profile UNLOCKED! Type 'health profile' to download your stamped PDF.\n"
+                    score_badge += f"• 🎉 30-Day Verified Profile Complete! Type 'health profile' to download your stamped PDF.\n"
 
                 report_text += score_badge
             except Exception as cs_err:

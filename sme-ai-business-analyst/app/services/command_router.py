@@ -19,8 +19,10 @@ from app.models.business import Business
 from app.models.customer import Customer
 from app.models.debt import Debt
 from app.models.inventory import InventoryItem
+from app.models.member import Member
 from app.models.transaction import Transaction
 from app.models.user import User
+from app.schemas.actor import ActorContext
 from app.services.credit_score_service import CreditScoreService
 from app.services.health_profile_pdf_service import BusinessHealthProfilePdfService
 from app.services.ledger_service import LedgerService
@@ -114,7 +116,8 @@ class CommandRouter:
             return True
 
         # -------------------------------------------------------------------
-        # 6. /statement -> 30-Day Account Ledger Statement (Cashflow & Entries)
+        # -------------------------------------------------------------------
+        # 6. /statement -> 30-Day Official Verified Business Statement PDF
         # -------------------------------------------------------------------
         if cmd_name in {"statement", "stmt", "downloadstatement", "accountstatement", "cmd_statement"}:
             await self._handle_statement(db, business, user, phone)
@@ -123,12 +126,12 @@ class CommandRouter:
         # -------------------------------------------------------------------
         # 6b. /profile -> 2-Page Institutional Business Health Profile PDF
         # -------------------------------------------------------------------
-        if cmd_name in {"profile", "healthprofile", "bankprofile", "smedan", "businessprofile", "cmd_profile"}:
+        if cmd_name in {"profile", "healthprofile", "businessprofile", "cmd_profile"}:
             await self._handle_profile(db, business, user, phone)
             return True
 
         # -------------------------------------------------------------------
-        # 7. /score -> Credit Underwriting Score & 30-Day Loan Streak
+        # 7. /score -> Credit Underwriting Score & 30-Day Record Streak
         # -------------------------------------------------------------------
         if cmd_name in {"score", "creditscore", "streak", "cmd_score"}:
             await self._handle_credit_score(db, business, user, phone)
@@ -183,20 +186,30 @@ class CommandRouter:
         # -------------------------------------------------------------------
         # 14. /report -> On-Demand Daily Summary Report
         # -------------------------------------------------------------------
-        if cmd_name in {"report", "daily", "todayreport"}:
-            from app.services.unified_report_service import UnifiedReportService
-            rep_svc = UnifiedReportService(whatsapp=self.whatsapp)
-            res = await rep_svc.generate_and_dispatch_report(db, user_id=user.id, cadence="daily")
-            msg = "📊 Dispatched your real-time daily business summary!" if res.get("status") == "sent" else "ℹ️ No activity recorded yet today to report."
-            send_res = await self.whatsapp.send_text(phone, msg)
-            await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
+        if cmd_name in {"report", "daily", "todayreport", "cmd_report"}:
+            await self._handle_report(db, business, user, phone)
             return True
 
         # -------------------------------------------------------------------
-        # 15. /void or /delete -> Void Last Transaction
+        # 15. /void or /delete -> Void Last Confirmed Transaction
         # -------------------------------------------------------------------
-        if cmd_name in {"void", "cancel", "delete", "deletelast", "undolast", "undo"}:
+        if cmd_name in {"void", "cancel", "delete", "deletelast", "undolast", "undo", "cmd_void"}:
             await self._handle_void(db, business, user, phone)
+            return True
+
+        # -------------------------------------------------------------------
+        # 16. Staff Management: /staff, /addstaff, /removestaff
+        # -------------------------------------------------------------------
+        if cmd_name in {"staff", "team", "members", "cmd_staff"}:
+            await self._handle_list_staff(db, business, user, phone)
+            return True
+
+        if cmd_name in {"addstaff", "invitestaff", "newstaff"}:
+            await self._handle_add_staff(db, business, user, phone, cmd_args)
+            return True
+
+        if cmd_name in {"removestaff", "deletestaff"}:
+            await self._handle_remove_staff(db, business, user, phone, cmd_args)
             return True
 
         return False
@@ -229,52 +242,52 @@ class CommandRouter:
                 ],
             },
             {
-                "title": "🏦 Statement & Profile",
+                "title": "📑 Reports & Statements",
                 "rows": [
                     {
                         "id": "cmd_statement",
-                        "title": "🏛️ Account Statement",
-                        "description": "30-day cashflow & transaction ledger",
+                        "title": "🏛️ Business Statement",
+                        "description": "30-day verified official PDF ledger",
                     },
                     {
                         "id": "cmd_profile",
-                        "title": "📑 Business Profile PDF",
-                        "description": "2-page bank underwriting & SMEDAN PDF",
+                        "title": "📑 Health Profile PDF",
+                        "description": "2-page institutional health report",
                     },
                     {
-                        "id": "cmd_score",
-                        "title": "🏆 Loan Credit Score",
-                        "description": "Check 300-850 score & 30-day streak",
+                        "id": "cmd_report",
+                        "title": "📊 Daily Summary",
+                        "description": "Sales, profit & margin report",
                     },
                 ],
             },
             {
-                "title": "📊 Books & Debtors",
+                "title": "👥 Team & Ledger",
                 "rows": [
                     {
-                        "id": "cmd_sales",
-                        "title": "📈 Today's Sales",
-                        "description": "Daily revenue, profit & cash collections",
+                        "id": "cmd_staff",
+                        "title": "👥 Staff & Team",
+                        "description": "View team members & seat capacity",
                     },
                     {
                         "id": "cmd_debtors",
-                        "title": "👥 Debtors Table",
+                        "title": "📋 Debtors Table",
                         "description": "Active customer debt balances",
+                    },
+                    {
+                        "id": "cmd_void",
+                        "title": "🗑️ Void Last Entry",
+                        "description": "Undo/cancel last confirmed transaction",
                     },
                 ],
             },
             {
-                "title": "☁️ Stock & Backup",
+                "title": "📦 Stock & Backup",
                 "rows": [
                     {
                         "id": "cmd_stock",
                         "title": "📦 Stock Inventory",
                         "description": "Stock on hand & low-stock alerts",
-                    },
-                    {
-                        "id": "cmd_drive",
-                        "title": "🔗 Google Drive Backup",
-                        "description": "Automated cloud archive setup",
                     },
                 ],
             },
@@ -284,7 +297,9 @@ class CommandRouter:
             f"👋 *Welcome to {business.name or 'Waasz AI'} Quick Actions*\n\n"
             "Tap *'Select Action'* below for instant 1-tap navigation, or type any shortcut:\n"
             "• `/receipt` • `/invoice` • `/iou` • `/statement`\n"
-            "• `/profile` • `/score` • `/sales` • `/stock` • `/drive`"
+            "• `/profile` • `/score` • `/report` • `/void`\n"
+            "• `/staff` • `/addstaff [name] [phone]` • `/removestaff [phone]`\n"
+            "• `/stock` • `/sales` • `/debtors` • `/drive`"
         )
 
         send_res = await self.whatsapp.send_interactive_list(
@@ -469,52 +484,34 @@ class CommandRouter:
         await self.ledger.record_outbound_message(db, business.id, phone, summary, send_res, user_id=user.id)
 
     async def _handle_statement(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
-        """Generates an itemized Account Transaction Statement (Sales & Expenses Ledger)."""
-        now = datetime.now(UTC)
-        start_date = now - timedelta(days=30)
+        """Generates and delivers official 30-Day Verified Statement PDF and text ledger."""
+        receipt_svc = ReceiptService()
+        try:
+            pdf_bytes, filename, summary = await receipt_svc.generate_statement_pdf(db, business.id, days=30)
+            caption = f"📑 Official Statement of Business Activity - {business.name}"
+            doc_res = await self.whatsapp.send_document_bytes(phone, pdf_bytes, filename=filename, caption=caption)
+            await self.ledger.record_outbound_message(db, business.id, phone, f"[Sent statement PDF {filename}]", doc_res, user_id=user.id)
 
-        stmt = (
-            select(Transaction)
-            .where(
-                Transaction.business_id == business.id,
-                Transaction.status == "confirmed",
-                Transaction.occurred_at >= start_date,
+            # Follow up with concise text summary
+            now = datetime.now(UTC)
+            start_date = now - timedelta(days=30)
+            summary_msg = (
+                f"🏛️ *Official Business Statement Delivered*\n\n"
+                f"• Business: *{business.name}*\n"
+                f"• Period: {start_date.strftime('%d %b')} – {now.strftime('%d %b %Y')} (30 Days)\n"
+                f"• Gross Sales: *{format_naira(Decimal(str(summary.get('total_sales', 0))))}* ({summary.get('sales_count', 0)} sales)\n"
+                f"• Operating Expenses: *{format_naira(Decimal(str(summary.get('total_expenses', 0))))}* ({summary.get('expense_count', 0)} expenses)\n"
+                f"• Net Profit: *{format_naira(Decimal(str(summary.get('net_profit', 0))))}*\n"
+                f"• Total Ledger Entries: *{summary.get('total_transactions', 0)}*\n\n"
+                "📄 Your official cryptographically verified Statement PDF is attached above."
             )
-            .order_by(Transaction.occurred_at.desc())
-        )
-        res = await db.execute(stmt)
-        txs = res.scalars().all()
-
-        sales = [t for t in txs if t.transaction_type == "sale"]
-        expenses = [t for t in txs if t.transaction_type == "expense"]
-        total_sales = sum(t.amount for t in sales)
-        total_exp = sum(t.amount for t in expenses)
-        net_cash = total_sales - total_exp
-
-        lines = [
-            f"🏛️ *Account Statement — {business.name}*",
-            f"📅 *Period:* {start_date.strftime('%d %b')} – {now.strftime('%d %b %Y')} (Last 30 Days)",
-            "---------------------------------------",
-            f"📈 *Total Inflow (Sales):* {format_naira(total_sales)} ({len(sales)} txns)",
-            f"💸 *Total Outflow (Expenses):* {format_naira(total_exp)} ({len(expenses)} txns)",
-            f"💰 *Net Cashflow:* {format_naira(net_cash)}",
-            "---------------------------------------",
-            "*Recent Ledger Transactions:*"
-        ]
-        if not txs:
-            lines.append("• No confirmed transactions recorded in the last 30 days.")
-        else:
-            for t in txs[:12]:
-                sign = "➕" if t.transaction_type == "sale" else "➖"
-                d_str = t.occurred_at.strftime("%d %b")
-                desc = t.item_name or t.description or t.transaction_type.capitalize()
-                credit_tag = " (Credit)" if t.is_credit else ""
-                lines.append(f"{sign} {d_str} | {desc}{credit_tag} | {format_naira(t.amount)}")
-
-        lines.append("\n💡 To download your institutional bank underwriting report, type *'/profile'*.")
-        statement_msg = "\n".join(lines)
-        send_res = await self.whatsapp.send_text(phone, statement_msg)
-        await self.ledger.record_outbound_message(db, business.id, phone, statement_msg, send_res, user_id=user.id)
+            text_res = await self.whatsapp.send_text(phone, summary_msg)
+            await self.ledger.record_outbound_message(db, business.id, phone, summary_msg, text_res, user_id=user.id)
+        except Exception as exc:
+            logger.error("Failed to generate statement PDF: %s", exc)
+            err_msg = "⚠️ Could not generate official statement PDF. Please ensure you have recorded confirmed sales or expenses first."
+            send_res = await self.whatsapp.send_text(phone, err_msg)
+            await self.ledger.record_outbound_message(db, business.id, phone, err_msg, send_res, user_id=user.id)
 
     async def _handle_profile(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
         """Compiles and delivers 2-page Institutional Financial Health Profile PDF."""
@@ -534,7 +531,7 @@ class CommandRouter:
                 f"• Underwriting Score: *{score_data.get('score', 650)} / 850* ({score_data.get('tier', 'Developing')})\n"
                 f"• 30-Day Revenue: ₦{score_data.get('sales_30d', 0):,.0f}\n"
                 f"• Ledger Streak: {score_data.get('active_days_last_30', 0)} of 30 days active\n\n"
-                "Your 2-page institutional underwriting PDF is attached above."
+                "Your 2-page institutional health report PDF is attached above."
             )
             text_res = await self.whatsapp.send_text(phone, summary)
             await self.ledger.record_outbound_message(db, business.id, phone, summary, text_res, user_id=user.id)
@@ -558,12 +555,12 @@ class CommandRouter:
         msg = (
             f"🏆 *Waasz Business Credit Score*\n\n"
             f"• *Score:* {score_val} / 850 [{tier} {tier_emoji}]\n"
-            f"• *30-Day Bank Loan Streak:* Day {streak} of 30 active\n"
+            f"• *30-Day Record Streak:* Day {streak} of 30 active\n"
         )
         if days_left > 0:
-            msg += f"• ⏳ *{days_left} more days* of active daily bookkeeping to unlock your Certified Bank Loan Profile!\n\n"
+            msg += f"• ⏳ *{days_left} more days* of active daily bookkeeping to complete your 30-day verified health profile!\n\n"
         else:
-            msg += "• 🎉 *Certified Bank Loan Profile UNLOCKED!* Text *'/statement'* to download your report.\n\n"
+            msg += "• 🎉 *30-Day Verified Profile Complete!* Text *'/statement'* to download your report.\n\n"
 
         msg += f"💡 *Financial Metrics:* 30-Day Revenue: ₦{score_data.get('sales_30d', 0):,.0f} | Recovery Ratio: {score_data.get('debt_settlement_ratio', 100)}%"
         send_res = await self.whatsapp.send_text(phone, msg)
@@ -715,10 +712,100 @@ class CommandRouter:
         send_res = await self.whatsapp.send_text(phone, msg)
         await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
 
+    async def _handle_report(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
+        """Generates and delivers on-demand daily business summary and metrics."""
+        now = datetime.now(UTC)
+        today_start = datetime(now.year, now.month, now.day, tzinfo=UTC)
+
+        stmt = (
+            select(Transaction)
+            .where(
+                Transaction.business_id == business.id,
+                Transaction.status == "confirmed",
+                Transaction.occurred_at >= today_start,
+            )
+            .order_by(Transaction.occurred_at.asc())
+        )
+        res = await db.execute(stmt)
+        txs = res.scalars().all()
+
+        sales = [t for t in txs if t.transaction_type == "sale"]
+        expenses = [t for t in txs if t.transaction_type == "expense"]
+        total_sales = sum(t.amount for t in sales)
+        total_credit = sum(t.amount for t in sales if t.is_credit)
+        total_cash = total_sales - total_credit
+        total_exp = sum(t.amount for t in expenses)
+        est_profit = total_sales - total_exp
+
+        # Format report message
+        report_lines = [
+            f"📊 *Daily Business Summary — {business.name}*",
+            f"📅 *Date:* {now.strftime('%d %b %Y')}",
+            "---------------------------------------",
+            f"📈 *Total Sales:* {format_naira(total_sales)} ({len(sales)} txns)",
+            f"   • Cash / Transfer: {format_naira(total_cash)}",
+            f"   • Credit Sales: {format_naira(total_credit)}",
+            f"💸 *Total Expenses:* {format_naira(total_exp)} ({len(expenses)} txns)",
+            f"💰 *Net Estimated Profit:* {format_naira(est_profit)}",
+            "---------------------------------------",
+        ]
+
+        if not txs:
+            report_lines.append("ℹ️ No transactions recorded yet today. Text e.g. *'sold 3 bags of cement 15k'* to record your first entry.")
+        else:
+            report_lines.append("*Items Recorded Today:*")
+            for t in txs[:6]:
+                sign = "➕" if t.transaction_type == "sale" else "➖"
+                item_label = t.item_name or t.description or t.transaction_type.capitalize()
+                credit_tag = " _(Credit)_" if t.is_credit else ""
+                report_lines.append(f"{sign} {item_label}{credit_tag}: {format_naira(t.amount)}")
+
+        # Append dashboard link if available
+        try:
+            from app.services.magic_link_service import MagicLinkService
+            from app.utils.url_helper import get_base_origin
+            magic_svc = MagicLinkService()
+            token = await magic_svc.create_link(db, business.id)
+            base_url = get_base_origin()
+            dash_url = f"{base_url}/reports/dashboard/{token}"
+            report_lines.append(f"\n🌐 *Live Business Dashboard:*\n👉 {dash_url}")
+        except Exception as e_link:
+            logger.warning("Could not append magic link: %s", e_link)
+
+        report_lines.append("\n💡 Text *'/statement'* for your 30-day verified statement PDF or *'/chart'* for trend visuals.")
+        msg = "\n".join(report_lines)
+        send_res = await self.whatsapp.send_text(phone, msg)
+        await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
+
+    async def _resolve_actor(self, db: AsyncSession, business: Business, user: User, phone: str) -> ActorContext:
+        """Resolves ActorContext with valid member_id from members table."""
+        stmt = (
+            select(Member)
+            .where(
+                Member.business_id == business.id,
+                Member.wa_id == phone,
+                Member.status.in_(("active", "invited")),
+            )
+            .limit(1)
+        )
+        res = await db.execute(stmt)
+        mem = res.scalar_one_or_none()
+        return ActorContext(
+            business_id=business.id,
+            member_id=mem.id if mem else None,
+            role=mem.role if mem else (user.role or "owner"),
+            wa_id=phone,
+            display_name=(mem.display_name if mem else None) or user.display_name or business.name,
+        )
+
     async def _handle_void(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
-        """Voids the latest confirmed transaction."""
+        """Voids the latest confirmed transaction with proper ActorContext."""
         from app.services.ledger_service import LedgerService
         ledger = LedgerService()
+
+        # Build proper ActorContext with actual Member ID
+        actor = await self._resolve_actor(db, business, user, phone)
+
         stmt = (
             select(Transaction)
             .where(Transaction.business_id == business.id, Transaction.status == "confirmed")
@@ -733,11 +820,113 @@ class CommandRouter:
             await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
             return
 
-        voided = await ledger.void_transaction(db, latest_tx.id, user.id, reason="Requested via /void shortcut")
-        if voided:
+        res_void = await ledger.void_transaction(
+            db,
+            actor=actor,
+            business=business,
+            transaction_id=latest_tx.id,
+            reason="Requested via /void shortcut",
+        )
+        if res_void.get("success"):
             item_desc = latest_tx.item_name or "transaction"
-            msg = f"🗑️ *Transaction Voided Successfully:*\nCancelled {latest_tx.transaction_type} of {item_desc} ({format_naira(latest_tx.amount)}). Deducted stock restored and linked debts cancelled."
+            msg = (
+                f"🗑️ *Transaction Voided Successfully:*\n"
+                f"Cancelled {latest_tx.transaction_type} of '{item_desc}' ({format_naira(latest_tx.amount)}).\n"
+                f"• Deducted inventory has been restored.\n"
+                f"• Associated customer debts cancelled."
+            )
         else:
-            msg = "⚠️ Could not void transaction."
+            err = res_void.get("error", "Could not void transaction.")
+            msg = f"⚠️ {err}"
+        send_res = await self.whatsapp.send_text(phone, msg)
+        await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
+
+    async def _handle_list_staff(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
+        """Lists team staff members and seat limits."""
+        from app.services.staff_service import StaffService
+        staff_svc = StaffService()
+        actor = await self._resolve_actor(db, business, user, phone)
+        res = await staff_svc.list_staff_members(db, business, actor)
+        if res.get("success"):
+            msg = res.get("formatted_text", "No staff members.")
+            msg += "\n\n💡 *Staff Shortcuts:*\n• `/addstaff [name] [phone]` — Invite new staff\n• `/removestaff [phone or name]` — Remove staff"
+        else:
+            msg = f"⚠️ {res.get('error', 'Could not retrieve staff list.')}"
+        send_res = await self.whatsapp.send_text(phone, msg)
+        await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
+
+    async def _handle_add_staff(self, db: AsyncSession, business: Business, user: User, phone: str, cmd_args: str) -> None:
+        """Invites a new staff member to the business."""
+        from app.services.staff_service import StaffService
+        from app.utils.phone import normalize_phone
+        staff_svc = StaffService()
+        actor = await self._resolve_actor(db, business, user, phone)
+
+        args_parts = cmd_args.strip().split()
+        if len(args_parts) < 2:
+            msg = (
+                "ℹ️ *How to add a staff member:*\n\n"
+                "Type: `/addstaff [name] [phone]`\n"
+                "Example: `/addstaff Chidi 08012345678`\n\n"
+                "Waasz will send an instant WhatsApp invitation to your staff member to start logging entries."
+            )
+            send_res = await self.whatsapp.send_text(phone, msg)
+            await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
+            return
+
+        # Name is everything except the last token (which is the phone number)
+        phone_num = args_parts[-1]
+        display_name = " ".join(args_parts[:-1])
+
+        res = await staff_svc.invite_staff_member(
+            db=db,
+            business=business,
+            actor=actor,
+            display_name=display_name,
+            phone_number=phone_num,
+            whatsapp=self.whatsapp,
+        )
+        if res.get("success"):
+            msg = (
+                f"✅ *Staff Invitation Sent!*\n\n"
+                f"• Name: *{display_name}*\n"
+                f"• Phone: *{res.get('phone_number', phone_num)}*\n"
+                f"• Status: Invited ⏳\n\n"
+                f"Your staff member has received a WhatsApp invite. Once they reply 'ACCEPT', they can log sales & expenses for {business.name}."
+            )
+        else:
+            msg = f"⚠️ {res.get('error', 'Could not invite staff member.')}"
+        send_res = await self.whatsapp.send_text(phone, msg)
+        await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
+
+    async def _handle_remove_staff(self, db: AsyncSession, business: Business, user: User, phone: str, cmd_args: str) -> None:
+        """Removes a staff member from the business."""
+        from app.services.staff_service import StaffService
+        staff_svc = StaffService()
+        actor = await self._resolve_actor(db, business, user, phone)
+
+        identifier = cmd_args.strip()
+        if not identifier:
+            msg = (
+                "ℹ️ *How to remove a staff member:*\n\n"
+                "Type: `/removestaff [phone or name]`\n"
+                "Example: `/removestaff 08012345678` or `/removestaff Chidi`\n\n"
+                "To see all current team members and phone numbers, text *'/staff'*."
+            )
+            send_res = await self.whatsapp.send_text(phone, msg)
+            await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)
+            return
+
+        res = await staff_svc.remove_staff_member(
+            db=db,
+            business=business,
+            actor=actor,
+            identifier=identifier,
+            whatsapp=self.whatsapp,
+        )
+        if res.get("success"):
+            msg = f"✅ *Staff Member Removed:*\n{res.get('display_name', identifier)} ({res.get('phone_number', '')}) has been removed from {business.name}."
+        else:
+            msg = f"⚠️ {res.get('error', 'Could not remove staff member.')}"
         send_res = await self.whatsapp.send_text(phone, msg)
         await self.ledger.record_outbound_message(db, business.id, phone, msg, send_res, user_id=user.id)

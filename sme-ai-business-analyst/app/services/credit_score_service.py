@@ -113,7 +113,6 @@ class CreditScoreService:
             "active_days_last_30": active_days,
             "days_streak": days_streak,
             "days_to_unlock": days_left,
-            "days_to_loan_unlock": days_left,
             "sales_30d": sales_vol,
             "expenses_30d": exp_vol,
             "debt_settlement_ratio": round(debt_ratio * 100, 1),

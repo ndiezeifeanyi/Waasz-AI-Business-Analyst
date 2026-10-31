@@ -179,7 +179,7 @@ class DispatchDebtNoticeInput(BaseModel):
 
 
 class GetCreditScoreInput(BaseModel):
-    """Retrieve the business owner's verified Waasz Business Credit Score (300 to 850), 30-day logging streak, tier badge, and days remaining to unlock the certified bank loan profile. Use whenever the merchant asks about their credit score, bank readiness, loan eligibility, or streak progress."""
+    """Retrieve the business owner's verified Waasz Business Credit Score (300 to 850), 30-day logging streak, tier badge, and days remaining to complete the 30-day verified health profile. Use whenever the merchant asks about their credit score, financial health, or streak progress."""
     model_config = {"title": "get_credit_score"}
 
 
@@ -514,7 +514,7 @@ class AgentService:
             "- FACTUAL TRANSPARENCY: If no records exist in the database for what the user is asking (e.g., they ask 'who owes me?' but have no debts logged, or 'how much did I sell?' but logged no sales today), DO NOT invent plausible numbers or fake customers. State clearly, truthfully, and helpfully that no records have been logged yet, and guide them on how to record them.\n\n"
             "### ⚡ AUTHORITATIVE FEATURE SELF-AWARENESS (NO FALSE NEGATIVES):\n"
             "- You must NEVER claim you do not have features that are built into Waasz. You are fully self-aware of your capabilities:\n"
-            "  1. 🏆 Waasz Business Credit Score (300 to 850) & 30-Day Loan Streak: You dynamically evaluate merchant financial health (consistency 35%, debt recovery 25%, margins 20%, expense capture 20%). Retrieve it via `get_credit_score`.\n"
+            "  1. 🏆 Waasz Business Credit Score (300 to 850) & 30-Day Logging Streak: You dynamically evaluate merchant financial health (consistency 35%, debt recovery 25%, margins 20%, expense capture 20%). Retrieve it via `get_credit_score`.\n"
             "  2. 📄 Formal 2-Page Business Health Report PDF: Merchants can generate and download an institutional financial health summary detailing verified 90-day cash flow, turnover, operating margins, receivables collection rate, and ledger consistency (triggered whenever the user asks for their 'health profile', 'statement', 'financial statement', or 'credit score').\n"
             "  3. 🏛️ Working Capital Protection & Automated Debt Enforcement: You track customer credit sales (`record_transaction` with is_credit=True), list debtors (`list_outstanding_debts`), mark debts paid (`mark_debt_paid`), and dispatch official multi-tier recovery notices directly to debtor phone numbers via WhatsApp/SMS (`dispatch_debt_notice`). Notice directing repayment straight to the merchant's bank account (OPay, Moniepoint, etc.).\n"
             "  4. 🧾 Instant Branded PDF Receipts & Invoices: Generate professional receipts directly to WhatsApp for any confirmed transaction via `generate_receipt`.\n"
@@ -1460,7 +1460,7 @@ class AgentService:
                 from app.services.credit_score_service import CreditScoreService
                 score_svc = CreditScoreService()
                 score_data = await score_svc.calculate_score(db, business.id)
-                days_left = score_data.get("days_to_unlock", score_data.get("days_to_loan_unlock", 0))
+                days_left = score_data.get("days_to_unlock", 0)
                 summary_msg = (
                     f"📊 Verified Business Credit Score: {score_data['score']}/850 ({score_data['tier']})\n"
                     f"• Status Badge: {score_data['badge']}\n"

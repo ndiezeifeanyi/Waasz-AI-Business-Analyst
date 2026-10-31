@@ -964,25 +964,25 @@ class WhatsAppWebhookProcessor:
             except Exception as e:
                 logger.warning("Could not save logo: %s", e)
 
-        # Check for statement / loan / health profile / credit score / data export commands
+        # Check for statement / health profile / credit score / data export commands
         statement_keywords = (
             "download statement", "send statement", "statement", "get statement",
-            "account statement", "financial statement", "loan statement", "bank statement",
+            "account statement", "financial statement", "ledger statement",
             "export my data", "export data", "download data", "send my data", "download my data",
             "business statement", "my statement", "health profile", "credit score", "my score",
-            "business health", "smedan statement", "loan profile"
+            "business health", "health report"
         )
         is_question = any(lower_text.startswith(q) for q in ["why", "what", "how", "who", "when", "where", "is", "can", "could", "should", "tell me"]) or "?" in lower_text
         is_statement_cmd = not is_question and (
             any(lower_text == kw or lower_text.startswith(kw) for kw in statement_keywords)
             or any(kw in lower_text for kw in (
-                "download statement", "send statement", "loan statement", "account statement",
-                "bank statement", "export my data", "export data", "download my data", "download data",
-                "financial statement", "business statement", "health profile", "smedan statement", "loan profile"
+                "download statement", "send statement", "account statement",
+                "export my data", "export data", "download my data", "download data",
+                "financial statement", "business statement", "health profile", "health report"
             ))
             or (
                 ("statement" in lower_text or "financial health" in lower_text)
-                and any(w in lower_text for w in ("download", "send", "get", "need", "want", "loan", "pdf", "export", "give"))
+                and any(w in lower_text for w in ("download", "send", "get", "need", "want", "pdf", "export", "give"))
             )
         )
         if is_statement_cmd:
