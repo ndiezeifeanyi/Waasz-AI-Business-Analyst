@@ -17,7 +17,38 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 BASE_DIR = Path(__file__).resolve().parents[3]
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
+
+def render_template(
+    template_name: str,
+    request: Request,
+    context: dict,
+    status_code: int = 200,
+) -> HTMLResponse:
+    """
+    Safely render a Jinja2 template across all Starlette / FastAPI versions.
+    Guarantees context['request'] is set and avoids signature mismatch TypeError (e.g. unhashable type: 'dict').
+    """
+    ctx = dict(context)
+    ctx["request"] = request
+    try:
+        # Starlette >= 0.28 signature: TemplateResponse(request=request, name=..., context=...)
+        return templates.TemplateResponse(
+            request=request,
+            name=template_name,
+            context=ctx,
+            status_code=status_code,
+        )
+    except (TypeError, ValueError):
+        # Fallback for Starlette < 0.28 signature: TemplateResponse(name=..., context=...)
+        return templates.TemplateResponse(
+            name=template_name,
+            context=ctx,
+            status_code=status_code,
+        )
+
+
 @router.get("/dashboard/{token}", response_class=HTMLResponse)
+@router.get("/webhooks/whatsapp/reports/dashboard/{token}", response_class=HTMLResponse)
 async def view_dashboard(
     request: Request,
     token: str,
@@ -27,20 +58,20 @@ async def view_dashboard(
 ):
     business_id = await magic_links.validate_token(db, token)
     if not business_id:
-        return templates.TemplateResponse(
+        return render_template(
+            template_name="dashboard_expired.html",
             request=request,
-            name="dashboard_expired.html",
             context={},
             status_code=403,
         )
 
     # Fetch business info for branding
     business = await db.get(Business, business_id)
-    business_name = business.name if business else "Business"
+    business_name = business.name if (business and business.name) else "Business"
 
-    return templates.TemplateResponse(
+    return render_template(
+        template_name="dashboard.html",
         request=request,
-        name="dashboard.html",
         context={
             "business_id": str(business_id),
             "business_name": business_name,
@@ -49,6 +80,7 @@ async def view_dashboard(
     )
 
 @router.get("/data/{token}")
+@router.get("/webhooks/whatsapp/reports/data/{token}")
 async def get_dashboard_data(
     token: str,
     days: int = Query(default=30, ge=1, le=365),

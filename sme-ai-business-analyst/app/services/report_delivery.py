@@ -16,6 +16,7 @@ from app.services.whatsapp_client import WhatsAppClient
 from app.services.visual_reports import VisualReportService
 from app.services.magic_link_service import MagicLinkService
 from app.services.task_service import TaskService
+from app.utils.url_helper import get_base_origin
 
 logger = logging.getLogger(__name__)
 
@@ -313,9 +314,7 @@ class ReportDeliveryService:
                         
                         # 3. Magic Link
                         token = await self.magic_links.create_link(db, business.id)
-                        base_url = settings.app_base_url.rstrip("/")
-                        if not base_url.startswith("http://") and not base_url.startswith("https://"):
-                            base_url = f"https://{base_url}"
+                        base_url = get_base_origin()
                         link_message = f"View your interactive dashboard here (valid for 2 days): {base_url}/reports/dashboard/{token}"
                         await self.whatsapp.send_text(business.phone_number, link_message)
 

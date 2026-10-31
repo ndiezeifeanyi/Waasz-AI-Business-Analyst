@@ -25,6 +25,7 @@ from app.services.ledger_service import LedgerService
 from app.services.magic_link_service import MagicLinkService
 from app.services.visual_reports import VisualReportService
 from app.services.whatsapp_client import WhatsAppClient
+from app.utils.url_helper import get_base_origin
 
 logger = logging.getLogger(__name__)
 
@@ -421,7 +422,7 @@ class UnifiedReportService:
                         dashboard_url = ""
                         try:
                             token = await self.magic_links.create_link(db, user.business_id, expires_in_days=3)
-                            base_url = settings.app_base_url.rstrip("/")
+                            base_url = get_base_origin()
                             dashboard_url = f"{base_url}/reports/dashboard/{token}"
                         except Exception as ml_err:
                             logger.warning("Could not generate dashboard magic link: %s", ml_err)
@@ -522,7 +523,7 @@ class UnifiedReportService:
         dashboard_url = ""
         try:
             token = await self.magic_links.create_link(db, user.business_id, expires_in_days=3)
-            base_url = settings.app_base_url.rstrip("/")
+            base_url = get_base_origin()
             dashboard_url = f"{base_url}/reports/dashboard/{token}"
         except Exception as ml_err:
             logger.warning("Could not generate dashboard magic link: %s", ml_err)
