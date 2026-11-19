@@ -33,8 +33,13 @@ def parse_occurred_at_date(date_str: str | None) -> datetime:
     if not date_str or not str(date_str).strip():
         return now_utc
 
+    from zoneinfo import ZoneInfo
+    lagos_tz = ZoneInfo("Africa/Lagos")
+    now_lagos = now_utc.astimezone(lagos_tz)
+
     raw = str(date_str).strip()
     import re
+    parsed_date = None
     m = re.match(r"^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$", raw)
     if m:
         p1, p2, p3 = m.groups()
@@ -48,18 +53,37 @@ def parse_occurred_at_date(date_str: str | None) -> datetime:
                     year += 2000
                 elif year < 1000:  # e.g. 026 -> 2026
                     year += 2000
-            return datetime(year, month, day, now_utc.hour, now_utc.minute, now_utc.second, tzinfo=UTC)
+            parsed_date = datetime(year, month, day).date()
         except Exception:
-            pass
+            parsed_date = None
 
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%Y/%m/%d", "%d-%m-%Y"):
-        try:
-            d = datetime.strptime(raw, fmt)
-            return datetime(d.year, d.month, d.day, now_utc.hour, now_utc.minute, now_utc.second, tzinfo=UTC)
-        except ValueError:
-            pass
+    if parsed_date is None:
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%Y/%m/%d", "%d-%m-%Y"):
+            try:
+                parsed_date = datetime.strptime(raw, fmt).date()
+                break
+            except ValueError:
+                pass
 
-    return now_utc
+    if parsed_date is None:
+        return now_utc
+
+    # If the date is today (in Lagos or UTC) or in the future, always use exact current UTC timestamp
+    # so occurred_at never jumps 24 hours into the future between 00:00 and 01:00 WAT (23:00-23:59 UTC).
+    if parsed_date >= now_lagos.date() or parsed_date == now_utc.date():
+        return now_utc
+
+    candidate_lagos = datetime(
+        parsed_date.year,
+        parsed_date.month,
+        parsed_date.day,
+        now_lagos.hour,
+        now_lagos.minute,
+        now_lagos.second,
+        tzinfo=lagos_tz,
+    )
+    candidate_utc = candidate_lagos.astimezone(UTC)
+    return min(candidate_utc, now_utc)
 
 
 class LedgerService:
@@ -956,7 +980,7 @@ class LedgerService:
                     Transaction.created_by_member_id == actor.member_id,
                     Transaction.status == "confirmed",
                 )
-                .order_by(Transaction.occurred_at.desc())
+                .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
                 .limit(1)
             )
         else:
@@ -966,7 +990,7 @@ class LedgerService:
                     Transaction.business_id == target_biz_id,
                     Transaction.status == "confirmed",
                 )
-                .order_by(Transaction.occurred_at.desc())
+                .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
                 .limit(1)
             )
 

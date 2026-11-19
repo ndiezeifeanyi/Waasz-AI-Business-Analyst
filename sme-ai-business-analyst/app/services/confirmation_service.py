@@ -1,6 +1,10 @@
+import logging
+import re
 import urllib.parse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -172,6 +176,8 @@ class ConfirmationService:
         transactions = tx_result.scalars().all()
         if transactions:
             low_stock_alerts: list[str] = []
+            step_up_alerts: list[str] = []
+            active_debt: Debt | None = None
             for transaction in transactions:
                 transaction.status = "confirmed"
                 transaction.confirmed_at = confirmation.confirmed_at
@@ -181,7 +187,8 @@ class ConfirmationService:
                     debt_res = await db.execute(
                         select(Debt).where(Debt.transaction_id == transaction.id).limit(1)
                     )
-                    if not debt_res.scalar_one_or_none():
+                    existing_debt = debt_res.scalar_one_or_none()
+                    if not existing_debt:
                         due_dt = None
                         if confirmation.extracted_record and confirmation.extracted_record.get("due_date"):
                             try:
@@ -204,6 +211,9 @@ class ConfirmationService:
                         )
                         db.add(debt)
                         await db.flush()
+                        active_debt = debt
+                    else:
+                        active_debt = existing_debt
 
                 if transaction.transaction_type == "sale" and transaction.item_name and transaction.quantity:
                     norm_item = transaction.item_name.strip().lower()
@@ -229,6 +239,24 @@ class ConfirmationService:
                             )
                         await db.flush()
 
+                # --- Cash Reconciliation & Alternative Credit Anomaly Hook ---
+                try:
+                    from app.services.risk.cash_reconciliation_service import CashReconciliationEngine
+                    risk_engine = CashReconciliationEngine()
+                    if transaction.transaction_type == "expense":
+                        await risk_engine.record_restock_expense(db, transaction.business_id, transaction)
+                    elif transaction.transaction_type == "sale":
+                        assessment = await risk_engine.evaluate_cash_sale(db, transaction.business_id, transaction)
+                        if assessment.risk_tier == "tier_1_step_up":
+                            amt_str = format_naira(transaction.amount)
+                            step_up_alerts.append(
+                                f"\n⚠️ *Credit Limit Notice:*\n"
+                                f"Your sale of {transaction.item_name or 'goods'} ({amt_str}) is significantly higher than your typical daily sales and is pending verification for your Credit Limit.\n"
+                                f"📸 *Snap a photo of the waybill, invoice, or transfer receipt* to verify this sale."
+                            )
+                except Exception as risk_err:
+                    logger.warning("Could not run cash risk evaluation for tx %s: %s", transaction.id, risk_err)
+
             if len(transactions) > 1:
                 total_sum = sum((t.amount or Decimal("0")) for t in transactions)
                 plural_type = "sales" if transactions[0].transaction_type == "sale" else "expenses"
@@ -246,42 +274,105 @@ class ConfirmationService:
                     due_str = str(confirmation.extracted_record["due_date"])[:10]
 
                 base_text = (
-                    f"Done! Confirmed credit sale of {item_desc} ({amt_fmt}) and recorded customer debt.\n\n"
+                    f"Done! Confirmed credit sale of {item_desc} ({amt_fmt}) to {cust_name}.\n\n"
                     f"🤝 *Digital IOU Generated (#{ref_code})*\n"
                     f"• *Customer:* {cust_name}" + (f" ({cust_phone})\n" if cust_phone else "\n") +
                     f"• *Amount:* {amt_fmt}\n"
                     f"• *Due Date:* {due_str}\n"
                 )
 
-                if cust_phone:
-                    from app.services.debt_notifier_service import DebtNotifierService
-                    notifier = DebtNotifierService()
-                    norm_phone = notifier.normalize_phone(cust_phone)
-                    bank_info = notifier._get_merchant_bank_info(biz) if biz else f"Account: {biz.name if biz else 'Merchant'}"
-                    concise_notice = (
-                        f"🏛️ *WAASZ VERIFIED MERCHANT REGISTRY*\n"
-                        f"IOU Ref: #{ref_code}\n\n"
-                        f"Dear {cust_name},\n"
-                        f"This confirms your credit purchase of {item_desc} ({amt_fmt}) from {biz.name if biz else 'the merchant'}.\n\n"
-                        f"📅 *Due Date:* {due_str}\n"
-                        f"💳 *Settlement Details:* {bank_info}\n\n"
-                        f"Please quote Ref #{ref_code} as transfer remark upon payment."
+                if active_debt:
+                    from app.services.debt_recovery_service import DebtRecoveryService
+                    recovery_svc = DebtRecoveryService()
+                    await recovery_svc.record_debt_event(
+                        db,
+                        business_id=biz.id if biz else transactions[0].business_id,
+                        debt_id=active_debt.id,
+                        event_type="sale",
+                        payload={
+                            "transaction_id": str(transactions[0].id),
+                            "amount": float(transactions[0].amount or 0),
+                            "customer_name": cust_name,
+                            "customer_phone": cust_phone,
+                            "due_date": due_str,
+                            "item_name": item_desc,
+                            "ref_code": ref_code,
+                        },
                     )
-                    from app.utils.url_helper import get_short_iou_url
-                    short_link = get_short_iou_url(ref_code)
-                    base_text += (
-                        f"\n📲 *Deliver IOU to {cust_name}:*\n"
-                        f"Tap below to send this official IOU notice directly to {cust_name} on WhatsApp:\n"
-                        f"👉 {short_link}\n\n"
-                        f"(Or text 'Send IOU to {cust_name}' to dispatch via automated registry)"
+
+                if cust_phone and active_debt:
+                    from app.utils.phone import validate_nigerian_phone
+                    is_valid_phone, norm_e164, phone_err = validate_nigerian_phone(cust_phone)
+                    short_link = f"https://waasz-sme-api.duckdns.org/i/{ref_code}"
+                    manual_msg = (
+                        f"Hello {cust_name}, here is your credit purchase record from {biz.name if biz else 'our shop'} "
+                        f"for {item_desc} ({amt_fmt}) due on {due_str}.\nDetails: {short_link}"
                     )
+                    clean_phone = re.sub(r"\D+", "", norm_e164 if is_valid_phone else cust_phone)
+                    wa_link = f"https://wa.me/{clean_phone}?text={urllib.parse.quote(manual_msg)}"
+
+                    if not is_valid_phone:
+                        base_text += (
+                            f"\n⚠️ *Debtor Phone Notice:* Customer phone '{cust_phone}' is not a valid Nigerian mobile number (+234...). "
+                            f"Automated WhatsApp reminders require a valid mobile number.\n\n"
+                            f"📲 *Manual Share Option:*\n👉 {wa_link}"
+                        )
+                    else:
+                        if biz:
+                            b_settings = dict(biz.settings or {})
+                            now_iso = datetime.now(UTC).isoformat()
+                            expires_iso = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+                            consents_map = dict(b_settings.get("pending_counter_consents") or {})
+                            consents_map[str(active_debt.id)] = {
+                                "debt_id": str(active_debt.id),
+                                "customer_name": cust_name,
+                                "customer_phone": norm_e164,
+                                "wa_link": wa_link,
+                                "short_link": short_link,
+                                "ref_code": ref_code,
+                                "member_id": str(confirmation.member_id) if confirmation.member_id else None,
+                                "staged_at": now_iso,
+                                "expires_at": expires_iso,
+                            }
+                            b_settings["pending_counter_consents"] = consents_map
+                            b_settings["pending_counter_consent"] = consents_map[str(active_debt.id)]
+                            biz.settings = b_settings
+
+                        base_text += (
+                            f"\n❓ *{cust_name} is buying on credit. Does {cust_name} agree to receive the record and payment reminders on WhatsApp?*\n"
+                            f"Reply *'1 {cust_name}'* (or *'YES {cust_name}'*) to confirm.\n"
+                            f"Reply *'2 {cust_name}'* (or *'NO {cust_name}'*) to decline.\n\n"
+                            f"📲 *Manual Share Option:*\n👉 {wa_link}"
+                        )
+
+                    # Send the merchant's credit invoice copy directly to the merchant
+                    try:
+                        from app.services.receipt_service import ReceiptService
+                        receipt_svc = ReceiptService()
+                        merchant_phone = biz.phone_number if biz else None
+                        if merchant_phone:
+                            pdf_bytes, inv_fname, _ = await receipt_svc.generate_receipt_pdf(
+                                db, business_id=biz.id, transaction_id=transactions[0].id
+                            )
+                            from app.services.whatsapp_client import WhatsAppClient
+                            wa_client = WhatsAppClient()
+                            await wa_client.send_document_bytes(
+                                merchant_phone,
+                                pdf_bytes,
+                                filename=inv_fname or f"Invoice_{ref_code}.pdf",
+                                caption=f"📄 Credit Invoice #{ref_code} — {cust_name} ({amt_fmt})",
+                            )
+                    except Exception as e:
+                        logger.warning("Could not auto-send merchant invoice copy: %s", e)
                 else:
-                    base_text += f"\n💡 *Tip:* Text me {cust_name}'s phone number to generate an instant 1-tap WhatsApp IOU link."
+                    base_text += f"\n💡 *Tip:* Add {cust_name}'s phone number to record counter consent and enable automated WhatsApp reminders."
             else:
                 base_text = confirmation_success_text(transactions[0].transaction_type, is_credit=transactions[0].is_credit)
 
             if low_stock_alerts:
                 base_text += "\n\n" + "\n".join(low_stock_alerts)
+            if step_up_alerts:
+                base_text += "\n" + "\n".join(step_up_alerts)
             return base_text
 
         move_result = await db.execute(

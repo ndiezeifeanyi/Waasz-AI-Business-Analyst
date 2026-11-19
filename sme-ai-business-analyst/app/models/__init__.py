@@ -8,6 +8,13 @@ from app.models.correction import Correction
 from app.models.cost import AiCostEvent
 from app.models.customer import Customer
 from app.models.debt import Debt
+from app.models.debt_recovery import (
+    DebtEvent,
+    DebtorConsent,
+    DebtorMessage,
+    MessageSuppression,
+    ReminderState,
+)
 from app.models.extraction import AiExtraction
 from app.models.google_drive_integration import GoogleDriveIntegration
 from app.models.inventory import InventoryItem, InventoryMovement
@@ -19,6 +26,8 @@ from app.models.message import WhatsAppMessage
 from app.models.payable import Payable
 from app.models.receipt_template import ReceiptTemplate
 from app.models.report import BusinessReport
+from app.models.cash_reconciliation import CashRestockReconciliation
+from app.models.risk_assessment import TransactionRiskAssessment
 from app.models.task import Task
 from app.models.transaction import Transaction
 from app.models.user import User
@@ -33,10 +42,14 @@ __all__ = [
     "Base",
     "Business",
     "BusinessReport",
+    "CashRestockReconciliation",
     "Confirmation",
     "Correction",
     "Customer",
     "Debt",
+    "DebtEvent",
+    "DebtorConsent",
+    "DebtorMessage",
     "GoogleDriveIntegration",
     "InventoryItem",
     "InventoryMovement",
@@ -44,10 +57,13 @@ __all__ = [
     "MagicLink",
     "MediaAsset",
     "Member",
+    "MessageSuppression",
     "Payable",
     "ReceiptTemplate",
+    "ReminderState",
     "Task",
     "Transaction",
+    "TransactionRiskAssessment",
     "User",
     "Waitlist",
     "WebhookEvent",

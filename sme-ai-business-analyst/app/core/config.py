@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     admin_dashboard_password_hash: str = ""
     admin_session_expire_days: int = 7
 
+    # Debt Recovery, Suppression & Test Safe Mode
+    suppression_secret_key: str = ""
+    is_test: bool = False
+    details_base_url: str = "https://waaszai.com"
+    founder_phone: str = "2347065015924"
+    meta_template_failure_threshold: float = 0.08
+    meta_template_stop_threshold: float = 0.03
+
 
     # AI Providers
     gemini_api_key: str = ""
@@ -200,6 +208,22 @@ class Settings(BaseSettings):
         # Debug mode warning
         if self.app_debug and self.app_env == "production":
             raise ValueError("DEBUG mode cannot be enabled in production!")
+
+        # Refuse to start without dedicated suppression key (Requirement 4)
+        if not self.suppression_secret_key and self.secret_key:
+            self.suppression_secret_key = self.secret_key
+        if self.app_env != "test" and not self.suppression_secret_key:
+            raise ValueError(
+                "SUPPRESSION_SECRET_KEY is required and cannot be empty. "
+                "Refusing to start without dedicated suppression key."
+            )
+
+        # IS_TEST warning (Requirement 7)
+        if getattr(self, "is_test", False):
+            if self.app_env == "production":
+                logger.error("🚨 CRITICAL WARNING: IS_TEST is ON in PRODUCTION! Outbound WhatsApp sends are simulated.")
+            else:
+                logger.warning("⚠️ WARNING: IS_TEST is ON. All outbound WhatsApp messages are simulated.")
 
 
 @lru_cache

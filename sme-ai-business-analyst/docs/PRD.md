@@ -142,7 +142,7 @@ Previous standalone bookkeeping mobile applications struggled with catastrophic 
   1. **Invoices & Receipts:**
      * `cmd_receipt` — Cash Receipt (PDF download for latest cash sale)
      * `cmd_invoice` — Credit Invoice (Credit sale invoice with repayment terms)
-     * `cmd_iou` — Customer IOU Link (1-tap WhatsApp debt forward link)
+     * `cmd_status` — Debt Status & Reminders (Active reminder schedule & follow-ups)
   2. **Reports & Statements:**
      * `cmd_statement` — Business Statement (30-day verified official PDF ledger)
      * `cmd_profile` — Health Profile PDF (2-page institutional business health report)
@@ -153,10 +153,14 @@ Previous standalone bookkeeping mobile applications struggled with catastrophic 
      * `cmd_void` — Void Last Entry (Cancel last confirmed transaction and restore inventory)
   4. **Stock & Inventory:**
      * `cmd_stock` — Stock Inventory (Stock on hand and low-stock alerts)
-* **Req 3.2 — Comprehensive Slash Command Registry:** Support direct typed commands and aliases:
+* **Req 3.2 — Comprehensive Slash Command Registry:** Support direct typed commands and aliases (both with `/` and as plain words):
   * `/menu`, `/help`, `/commands` $\rightarrow$ Interactive menu drawer.
   * `/receipt`, `/rcpt` $\rightarrow$ Latest cash receipt PDF.
   * `/invoice`, `/inv` $\rightarrow$ Latest credit sale invoice PDF.
+  * `/status`, `/status [customer]` $\rightarrow$ Portfolio debt overview or customer-specific debt & reminder card.
+  * `/pause [customer]` $\rightarrow$ Temporarily pause automated reminders for a debtor.
+  * `/resume [customer]` $\rightarrow$ Resume automated reminder ladder for a debtor.
+  * `/reminders on`, `/reminders off` $\rightarrow$ Shop-wide automated reminder ladder kill switch.
   * `/iou` $\rightarrow$ Shortened customer debt acknowledgement link.
   * `/debtors`, `/debts`, `/whoowesme` $\rightarrow$ Outstanding customer receivables table.
   * `/statement`, `/stmt` $\rightarrow$ Official 30-day verified financial statement PDF.
@@ -189,14 +193,29 @@ Previous standalone bookkeeping mobile applications struggled with catastrophic 
 
 ---
 
-### Module 5: Customer Debt Management & Shortlink Recovery Engine
-* **Req 5.1 — Automatic Debt Ledger:** Credit sales automatically register under the linked `Customer` record.
-* **Req 5.2 — Shortened IOU Magic Links (`/i/{code}`):** Waasz generates clean, shortened URLs (`https://waasz-sme-api.duckdns.org/i/{code}`) containing customer debt details and bank transfer instructions. Merchants forward the link to customers in one tap.
-* **Req 5.3 — 3-Tier Debt Escalation Protocol:** Automated or merchant-triggered reminder notices:
-  1. *Gentle Reminder (Friendly):* Courtesy notice sent prior to or on the due date.
-  2. *Formal Overdue Notice (Standard):* Professional notice highlighting overdue status, balance, and bank transfer details.
-  3. *Urgent Demand Notice (Firm):* Final formal demand requesting immediate settlement to avoid trade credit suspension.
-* **Req 5.4 — Receivables Lookup:** Merchants can query outstanding balances anytime via `/debtors` or natural language (*"Who owes me?"*, *"How much does Chidi owe?"*).
+### Module 5: Consent-Based Automated Debt Recovery & Institutional Reminder Ladder Engine
+* **Req 5.1 — Automatic Debt Ledger & Counter Consent Protocol:** Credit sales automatically register under the linked `Customer` record. Waasz prompts the merchant at the counter: *"Does [Customer] agree to receive the record and payment reminders on WhatsApp? Reply 1 for yes, 2 for no."*
+  * Only when the merchant confirms `1` (or debtor provides verbal consent) is an active `debtor_consents` record created (`source='attested_by_merchant'`).
+  * If declined, no automated messages are ever sent, and only manual `wa.me` share links are provided.
+* **Req 5.2 — Six Strict Sending Gates:** Before any automated template is dispatched, Waasz evaluates six mandatory gates:
+  1. *Global Kill Switch:* Emergency toggle (`reminders off`).
+  2. *Counter Consent Check:* Active consent row in `debtor_consents`.
+  3. *Global Suppression Check:* Recipient phone hash not present in `message_suppressions`.
+  4. *Quiet Hours Enforcement:* Sends permitted only between 08:00 and 19:00 WAT Monday–Saturday (Sundays after 12:00 WAT). Nighttime messages are queued for 08:00 WAT.
+  5. *Frequency Caps:* Max 1 automated message per 24 hours; max 4 automated messages per rolling 7 days across all debts for that phone.
+  6. *Reminder Pause State:* Respects debtor grace requests or merchant pauses (`/pause [customer]`).
+* **Req 5.3 — Meta Utility Templates (V2 Suite) & Dynamic Details Page:**
+  * Categorized strictly under **UTILITY** (ensuring 24/7 delivery outside Meta's 24-hour customer service window).
+  * Templates never contain bank details or raw PDF attachments (preventing Meta parameter mismatch error `132000`).
+  * Every template features dynamic URL button `https://waaszai.com/r/{{token}}` leading to a signed, token-authenticated web details page with bank settlement instructions, balance breakdown, and downloadable PDF invoice.
+  * Standardized opt-out footer on all messages: *"Reply STOP to stop these messages."*
+  * Quick reply action buttons: `"I have paid"`, `"Need more time"` / `"Choose a date"`, `"This is not me"`.
+* **Req 5.4 — Automated Reminder Ladder:**
+  * Runs daily via APScheduler at 10:00 AM WAT.
+  * Offsets: Day -2 (Due Soon), Day 0 (Due Today), Day +3 (Grace Overdue), Day +7 (Overdue), Day +10 (Final Notice).
+  * Day +21: Generates smart escalation card for the merchant with a pre-filled `wa.me` direct settlement link.
+* **Req 5.5 — Truthful Delivery Tracking:** Outbound HTTP 200 responses are recorded strictly as `accepted`. Messages transition to `delivered` and `read` solely upon receiving verified delivery webhooks from Meta, eliminating false "delivered" claims.
+* **Req 5.6 — Receivables Lookup & Status Controls:** Merchants can query outstanding balances anytime via `/status` (portfolio overview), `/status [customer]` (customer card), `/pause [customer]`, and `/resume [customer]`.
 
 ---
 

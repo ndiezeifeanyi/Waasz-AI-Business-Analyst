@@ -396,6 +396,20 @@ class ReportScheduler:
         logger.info("Finished backlogged onboarding dispatch: %d sent", sent_count)
         return sent_count
 
+    async def run_daily_debt_reminder_ladder(self) -> dict[str, int]:
+        """Daily job at 10:00 AM WAT: evaluate and dispatch scheduled debtor reminder ladder."""
+        now_utc = datetime.now(UTC)
+        self.last_run_times["dispatch_daily_debt_reminder_ladder"] = now_utc.isoformat()
+        logger.info("Running scheduled daily debt reminder ladder job...")
+        try:
+            from app.services.reminder_ladder_service import ReminderLadderService
+            ladder_svc = ReminderLadderService()
+            async with async_session_factory() as session:
+                return await ladder_svc.run_daily_ladder_check(session)
+        except Exception as exc:
+            logger.exception("Daily debt reminder ladder job failed: %s", exc)
+            return {"status": "error", "error": str(exc)}
+
     def start(self) -> None:
         self.scheduler.add_job(
             self.run_daily_inactivity_nudges,
@@ -532,6 +546,13 @@ class ReportScheduler:
                 timezone=settings.local_timezone,
             ),
             id="dispatch_backlogged_onboarding_20261009",
+            replace_existing=True,
+        )
+        # Daily debt reminder ladder at 10:00 AM WAT (within quiet hours)
+        self.scheduler.add_job(
+            self.run_daily_debt_reminder_ladder,
+            CronTrigger(hour=10, minute=0, timezone=settings.local_timezone),
+            id="dispatch_daily_debt_reminder_ladder",
             replace_existing=True,
         )
         self.scheduler.start()

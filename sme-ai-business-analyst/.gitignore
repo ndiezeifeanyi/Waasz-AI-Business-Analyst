@@ -26,3 +26,17 @@ scratch/
 test_output_final*.txt
 test_output_utf8.txt
 .streamlit/secrets.toml
+*.pem
+
+# Pitch decks, marketing assets, and one-off root helpers
+*.pptx
+*.pdf
+*.mp4
+video_production/
+test_render.html
+linkedin_infographic.html
+apply_smedan_pitch_revamp.py
+decode_qr.py
+extracted_*.png
+waasz_*.png
+Waasz_AI_Slide_10_Roadmap.png

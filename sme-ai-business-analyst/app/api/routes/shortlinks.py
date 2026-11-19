@@ -11,7 +11,7 @@ import urllib.parse
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import cast, select, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,14 +31,13 @@ router = APIRouter(tags=["shortlinks"])
 def _extract_merchant_bank_info(biz: Business | None) -> str:
     """Extract clean bank settlement details from business settings."""
     if not biz or not biz.settings or not isinstance(biz.settings, dict):
-        return f"Account: {biz.name if biz else 'Merchant'}"
+        return f"Contact {biz.name if biz else 'Merchant'} for account number"
     b_name = biz.settings.get("bank_name", "")
     b_acct = biz.settings.get("account_number", "")
-    b_owner = biz.settings.get("account_name", "")
+    b_owner = biz.settings.get("account_name", "") or (biz.name if biz else "")
     if b_acct:
-        parts = [p for p in [b_name, b_acct, f"({b_owner})" if b_owner else ""] if p]
-        return " • ".join(parts)
-    return f"Account: {biz.name}"
+        return f"Bank: {b_name} | Account: {b_acct} ({b_owner})" if b_name else f"Account: {b_acct} ({b_owner})"
+    return f"Contact {biz.name if biz else 'Merchant'} for account number"
 
 
 @router.get("/i/{code}", response_class=HTMLResponse)
@@ -154,6 +153,46 @@ async def resolve_iou_shortlink(
         wa_link=wa_link,
     )
     return HTMLResponse(content=html_content, status_code=200)
+
+
+@router.get("/i/{code}/pdf")
+@router.get("/iou/{code}/pdf")
+async def download_iou_pdf(
+    code: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Directly streams the official PDF Commercial Invoice for an IOU code.
+    """
+    clean_code = code.strip().upper()
+    hex_prefix = clean_code.replace("WZ-", "").replace("WZ", "").strip().lower()
+
+    # Search transaction or debt
+    tx_stmt = select(Transaction).where(cast(Transaction.id, String).ilike(f"{hex_prefix}%")).limit(1)
+    tx = (await db.execute(tx_stmt)).scalar_one_or_none()
+    if not tx:
+        debt_stmt = select(Debt).where(cast(Debt.id, String).ilike(f"{hex_prefix}%")).limit(1)
+        debt = (await db.execute(debt_stmt)).scalar_one_or_none()
+        if debt and debt.transaction_id:
+            tx = await db.get(Transaction, debt.transaction_id)
+        elif debt:
+            tx_stmt2 = select(Transaction).where(Transaction.id == debt.transaction_id).limit(1)
+            tx = (await db.execute(tx_stmt2)).scalar_one_or_none()
+
+    if not tx:
+        raise HTTPException(status_code=404, detail="Invoice record not found.")
+
+    from app.services.receipt_service import ReceiptService
+    receipt_svc = ReceiptService()
+    pdf_bytes, filename, _ = await receipt_svc.generate_receipt_pdf(
+        db, business_id=tx.business_id, transaction_id=tx.id
+    )
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 def _render_iou_card(
@@ -347,8 +386,12 @@ def _render_iou_card(
         <div class="bank-box-content">{bank_info}</div>
       </div>
 
+      <a href="/i/{ref_code}/pdf" class="btn-pdf" target="_blank" style="display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; background: #0284c7; color: #ffffff; text-decoration: none; padding: 15px 20px; border-radius: 14px; font-size: 15px; font-weight: 700; margin-bottom: 12px; box-shadow: 0 4px 14px rgba(2, 132, 199, 0.3);">
+        <span>📄 View & Download Official Invoice (PDF)</span>
+      </a>
+
       <a id="waBtn" href="{wa_link}" class="btn-whatsapp">
-        <span>📲 Open in WhatsApp & Deliver IOU</span>
+        <span>📲 Open in WhatsApp</span>
       </a>
 
       <div class="footer-note">
@@ -357,16 +400,6 @@ def _render_iou_card(
       </div>
     </div>
   </div>
-
-  <script>
-    // Automatically trigger WhatsApp forward on mobile devices after short delay
-    setTimeout(function() {{
-      const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-      if (isMobile) {{
-        window.location.href = "{wa_link}";
-      }}
-    }}, 600);
-  </script>
 </body>
 </html>"""
 

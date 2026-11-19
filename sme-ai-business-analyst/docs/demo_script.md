@@ -102,3 +102,81 @@ Reply:
 ```text
 ✅ All your personal records, conversation memory, and uploaded documents have been permanently deleted.
 ```
+
+---
+
+## 5. Quick Action Drawer (`/menu`) & Debt Recovery Commands
+
+### Step 1: Open WhatsApp Interactive 10-Row Menu Drawer
+```powershell
+.\.venv\Scripts\python scripts/demo_webhook.py --phone "+2348033334444" --text "/menu"
+```
+**Expected Response**:
+Interactive WhatsApp list drawer with 10 rows (strictly respecting Meta's 10-row limit), including the latest button:
+- **Section 1: 🧾 Invoices, Debts & Receipts**
+  - `cmd_receipt`: Cash Receipt (Download PDF for latest cash sale)
+  - `cmd_invoice`: Credit Invoice (Download credit sale invoice with terms)
+  - `cmd_status`: 📊 Debt Status & Reminders (Active reminder schedule & follow-ups)
+- **Section 2: 📑 Reports & Statements**
+  - `cmd_statement`, `cmd_profile`, `cmd_report`
+- **Section 3: 👥 Team & Ledger**
+  - `cmd_staff`, `cmd_debtors`, `cmd_void`
+- **Section 4: 📦 Stock & Backup**
+  - `cmd_stock`
+
+### Step 2: Plain-Word Debt Status & Customer Controls
+```powershell
+# Check portfolio reminder overview
+.\.venv\Scripts\python scripts/demo_webhook.py --phone "+2348033334444" --text "status"
+
+# Check specific customer debt & reminder card
+.\.venv\Scripts\python scripts/demo_webhook.py --phone "+2348033334444" --text "status Emeka"
+
+# Pause reminders for customer
+.\.venv\Scripts\python scripts/demo_webhook.py --phone "+2348033334444" --text "pause Emeka"
+
+# Resume reminders for customer
+.\.venv\Scripts\python scripts/demo_webhook.py --phone "+2348033334444" --text "resume Emeka"
+
+# Shop-wide kill switch toggle
+.\.venv\Scripts\python scripts/demo_webhook.py --phone "+2348033334444" --text "reminders off"
+.\.venv\Scripts\python scripts/demo_webhook.py --phone "+2348033334444" --text "reminders on"
+```
+
+---
+
+## 6. End-to-End Consent-Based Debt Recovery Flow (Phase 5)
+
+### Complete Lifecycle:
+1. **Credit Sale Recorded**: Merchant inputs `"Sold 2 bags of rice to Emeka ₦50,000 on credit"`.
+2. **Counter Consent Staged**: Waasz asks:
+   > *"Emeka is buying on credit. Does Emeka agree to receive the record and payment reminders on WhatsApp? Reply 1 for yes, 2 for no."*
+3. **Merchant Confirms (`1`)**:
+   - Waasz saves consent under `debtor_consents` (`source='attested_by_merchant'`).
+   - Evaluates the 6 sending gates (Kill switch, Consent, Global suppression, Quiet hours [08:00–19:00 WAT], Frequency caps [1/day, 4/7-days], Reminder pause).
+   - If gates pass: immediately dispatches `iou_record_v2` to debtor and marks status **`accepted`** (truthful reporting: HTTP 200 = accepted, never delivered).
+   - If during quiet hours: queues message and informs merchant that delivery will occur at 08:00 WAT.
+   - Always provides the merchant with a 1-tap manual `wa.me` link.
+4. **Debtor Receives WhatsApp Template**:
+   - Institutional notice with opt-out footer (`"Reply STOP to stop these messages."`).
+   - Dynamic URL button: `"View details"` pointing to `https://waaszai.com/r/{{token}}` where bank details and downloadable PDF invoice reside.
+   - Quick Reply button: `"This is not me"`.
+5. **Debtor Inbound Actions**:
+   - **`"I have paid"`**: Notifies merchant immediately (`"🔔 Customer Payment Notification: Emeka reported that they have paid ₦50,000"`), pauses reminders for 48 hours for verification, and logs a `tap` event.
+   - **`"STOP"`**: Immediately hashes phone and writes to `message_suppressions`. Globally blocks all automated messages across all merchants.
+   - **`"START"`**: Debtor resumes automated messages.
+6. **Merchant Confirms Settlement**:
+   - Merchant replies `"paid Emeka"` or records full payment.
+   - Debt marked `paid`, `reminder_state.stopped_at` set to now.
+   - Confirmation receipt `iou_paid_v2` dispatched to debtor.
+
+### Run End-to-End Automated Tests & Live Verification:
+```powershell
+# 1. Run full 49-test suite across Phases 1 to 5
+.\.venv\Scripts\python -m pytest tests/test_debt_recovery_phase1.py tests/test_debt_recovery_phase2.py tests/test_debt_recovery_phase3.py tests/test_debt_recovery_phase4.py tests/test_debt_recovery_phase5.py -v
+
+# 2. Run real live end-to-end verification against Supabase database
+.\.venv\Scripts\python scratch/verify_phase5_e2e.py
+```
+
+

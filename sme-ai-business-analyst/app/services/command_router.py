@@ -58,17 +58,62 @@ class CommandRouter:
         """
         raw_cmd = (interactive_id or source_text or "").strip().lower()
 
-        # Normalize slash command triggers
+        # Normalize command triggers (supports with or without leading '/' for WhatsApp Business compatibility)
         cmd_name = ""
         cmd_args = ""
+
+        # Multi-word triggers that should be unified
+        MULTI_WORD_MAP = {
+            "credit score": "score",
+            "health profile": "profile",
+            "business profile": "profile",
+            "who owes me": "debtors",
+            "today report": "report",
+            "daily report": "report",
+            "low stock": "lowstock",
+            "quick actions": "menu",
+            "reminders on": "reminderson",
+            "reminders off": "remindersoff",
+        }
+
+        KNOWN_SINGLE_COMMANDS = {
+            "menu", "help", "commands", "shortcuts",
+            "receipt", "rcpt",
+            "invoice", "inv",
+            "iou",
+            "status",
+            "pause", "resume",
+            "reminders",
+            "debtors", "debts", "whoowesme",
+            "statement", "stmt", "downloadstatement", "accountstatement",
+            "profile", "healthprofile", "businessprofile",
+            "score", "creditscore", "streak",
+            "sales", "revenue", "profit",
+            "expenses", "costs",
+            "stock", "inventory",
+            "lowstock", "reorder",
+            "chart", "graph", "dashboard",
+            "drive", "connectdrive", "backup", "disconnectdrive", "unlinkdrive",
+            "report", "daily", "todayreport",
+            "void", "cancel", "delete", "deletelast", "undolast", "undo",
+            "staff", "team", "members", "addstaff", "invitestaff", "newstaff", "removestaff",
+        }
+
         if raw_cmd.startswith("cmd_") or raw_cmd.startswith("stmt_"):
             cmd_name = raw_cmd
         elif raw_cmd.startswith("/"):
             parts = raw_cmd[1:].split(maxsplit=1)
             cmd_name = parts[0].lower() if parts else ""
             cmd_args = parts[1].strip() if len(parts) > 1 else ""
-        elif raw_cmd in {"menu", "help", "commands", "shortcuts", "quick actions"}:
-            cmd_name = "menu"
+        elif raw_cmd in MULTI_WORD_MAP:
+            cmd_name = MULTI_WORD_MAP[raw_cmd]
+            cmd_args = ""
+        else:
+            parts = raw_cmd.split(maxsplit=1)
+            first_word = parts[0].lower() if parts else ""
+            if first_word in KNOWN_SINGLE_COMMANDS:
+                cmd_name = first_word
+                cmd_args = parts[1].strip() if len(parts) > 1 else ""
 
         if not cmd_name:
             return False
@@ -106,6 +151,37 @@ class CommandRouter:
         # -------------------------------------------------------------------
         if cmd_name in {"iou", "cmd_iou"}:
             await self._handle_iou(db, business, user, phone)
+            return True
+
+        # -------------------------------------------------------------------
+        # 4b. /status -> Overall debt status summary or specific debtor status
+        # -------------------------------------------------------------------
+        if cmd_name in {"status", "cmd_status"}:
+            if cmd_args:
+                await self._handle_customer_status(db, business, user, phone, cmd_args)
+            else:
+                await self._handle_status_summary(db, business, user, phone)
+            return True
+
+        # -------------------------------------------------------------------
+        # 4c. /pause -> Pause reminders for a debtor (e.g. 'pause Emeka')
+        # -------------------------------------------------------------------
+        if cmd_name in {"pause", "cmd_pause"}:
+            await self._handle_pause_reminders(db, business, user, phone, cmd_args)
+            return True
+
+        # -------------------------------------------------------------------
+        # 4d. /resume -> Resume reminders for a debtor (e.g. 'resume Emeka')
+        # -------------------------------------------------------------------
+        if cmd_name in {"resume", "cmd_resume"}:
+            await self._handle_resume_reminders(db, business, user, phone, cmd_args)
+            return True
+
+        # -------------------------------------------------------------------
+        # 4e. /reminders -> Toggle shop reminders (e.g. 'reminders on/off')
+        # -------------------------------------------------------------------
+        if cmd_name in {"reminders", "reminderson", "remindersoff", "cmd_reminders"}:
+            await self._handle_toggle_reminders(db, business, user, phone, cmd_name, cmd_args)
             return True
 
         # -------------------------------------------------------------------
@@ -233,7 +309,7 @@ class CommandRouter:
         """Sends the native WhatsApp interactive list drawer (10 options)."""
         sections = [
             {
-                "title": "🧾 Invoices & Receipts",
+                "title": "🧾 Invoices, Debts & Receipts",
                 "rows": [
                     {
                         "id": "cmd_receipt",
@@ -246,9 +322,9 @@ class CommandRouter:
                         "description": "Download credit sale invoice with terms",
                     },
                     {
-                        "id": "cmd_iou",
-                        "title": "🤝 Customer IOU Link",
-                        "description": "1-tap WhatsApp debt forward link",
+                        "id": "cmd_status",
+                        "title": "📊 Debt Status & Reminders",
+                        "description": "Active reminder schedule & follow-ups",
                     },
                 ],
             },
@@ -308,9 +384,8 @@ class CommandRouter:
             f"👋 *Welcome to {business.name or 'Waasz AI'} Quick Actions*\n\n"
             "Tap *'Select Action'* below for instant 1-tap navigation, or type any shortcut:\n"
             "• `/receipt` • `/invoice` • `/iou` • `/statement`\n"
-            "• `/profile` • `/score` • `/report` • `/void`\n"
-            "• `/staff` • `/addstaff [name] [phone]` • `/removestaff [phone]`\n"
-            "• `/stock` • `/sales` • `/debtors` • `/drive`"
+            "• `/status` (or `status [name]`) • `/pause [name]` • `/resume [name]`\n"
+            "• `/reminders on/off` • `/debtors` • `/report` • `/stock` • `/void`"
         )
 
         send_res = await self.whatsapp.send_interactive_list(
@@ -340,7 +415,7 @@ class CommandRouter:
                 t_stmt = t_stmt.where(Transaction.is_credit.is_(True))
             else:
                 t_stmt = t_stmt.where(Transaction.is_credit.is_(False))
-            t_stmt = t_stmt.order_by(Transaction.occurred_at.desc()).limit(1)
+            t_stmt = t_stmt.order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc()).limit(1)
 
             t_res = await db.execute(t_stmt)
             target_tx = t_res.scalar_one_or_none()
@@ -390,7 +465,7 @@ class CommandRouter:
                 Transaction.is_credit.is_(True),
                 Transaction.status == "confirmed",
             )
-            .order_by(Transaction.occurred_at.desc())
+            .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
             .limit(1)
         )
         res = await db.execute(stmt)
@@ -468,7 +543,7 @@ class CommandRouter:
         debts_stmt = (
             select(Debt, Customer)
             .join(Customer, Debt.customer_id == Customer.id)
-            .where(Debt.business_id == business.id, Debt.status.in_(["unpaid", "partially_paid"]))
+            .where(Debt.business_id == business.id, Debt.status.in_(["outstanding", "unpaid", "partially_paid", "pending"]))
             .order_by(Debt.created_at.desc())
         )
         res = await db.execute(debts_stmt)
@@ -493,6 +568,60 @@ class CommandRouter:
         summary = "\n".join(lines)
         send_res = await self.whatsapp.send_text(phone, summary)
         await self.ledger.record_outbound_message(db, business.id, phone, summary, send_res, user_id=user.id)
+
+    async def _handle_status_summary(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
+        """Handles 'status' command alone: returns full overview of debts and scheduled reminders."""
+        from app.services.reminder_ladder_service import ReminderLadderService
+        ladder_svc = ReminderLadderService(whatsapp=self.whatsapp)
+        summary = await ladder_svc.get_status_overview(db, business)
+        send_res = await self.whatsapp.send_text(phone, summary)
+        await self.ledger.record_outbound_message(db, business.id, phone, summary, send_res, user_id=user.id)
+
+    async def _handle_customer_status(self, db: AsyncSession, business: Business, user: User, phone: str, query_name: str) -> None:
+        """Handles 'status Emeka': returns detailed status and reminder history for specific customer."""
+        from app.services.reminder_ladder_service import ReminderLadderService
+        ladder_svc = ReminderLadderService(whatsapp=self.whatsapp)
+        summary = await ladder_svc.get_customer_status(db, business, query_name)
+        send_res = await self.whatsapp.send_text(phone, summary)
+        await self.ledger.record_outbound_message(db, business.id, phone, summary, send_res, user_id=user.id)
+
+    async def _handle_pause_reminders(self, db: AsyncSession, business: Business, user: User, phone: str, query_name: str) -> None:
+        """Handles 'pause Emeka': pauses reminders for customer for 7 days."""
+        if not query_name:
+            reply = "ℹ️ Please specify which debtor to pause reminders for, e.g. *'pause Emeka'*. Text *'debtors'* to view all customer names."
+        else:
+            from app.services.reminder_ladder_service import ReminderLadderService
+            ladder_svc = ReminderLadderService(whatsapp=self.whatsapp)
+            reply = await ladder_svc.pause_reminders_for_customer(db, business, query_name)
+        send_res = await self.whatsapp.send_text(phone, reply)
+        await self.ledger.record_outbound_message(db, business.id, phone, reply, send_res, user_id=user.id)
+
+    async def _handle_resume_reminders(self, db: AsyncSession, business: Business, user: User, phone: str, query_name: str) -> None:
+        """Handles 'resume Emeka': unpauses automated reminders."""
+        if not query_name:
+            reply = "ℹ️ Please specify which debtor to resume reminders for, e.g. *'resume Emeka'*. Text *'debtors'* to view all customer names."
+        else:
+            from app.services.reminder_ladder_service import ReminderLadderService
+            ladder_svc = ReminderLadderService(whatsapp=self.whatsapp)
+            reply = await ladder_svc.resume_reminders_for_customer(db, business, query_name)
+        send_res = await self.whatsapp.send_text(phone, reply)
+        await self.ledger.record_outbound_message(db, business.id, phone, reply, send_res, user_id=user.id)
+
+    async def _handle_toggle_reminders(self, db: AsyncSession, business: Business, user: User, phone: str, cmd_name: str, cmd_args: str) -> None:
+        """Handles 'reminders on/off': toggles shop-wide reminder automation."""
+        from app.services.reminder_ladder_service import ReminderLadderService
+        ladder_svc = ReminderLadderService(whatsapp=self.whatsapp)
+        lower_args = (cmd_args or "").strip().lower()
+        if cmd_name == "reminderson" or lower_args in {"on", "enable", "start", "1", "yes"}:
+            reply = await ladder_svc.toggle_shop_reminders(db, business, enabled=True)
+        elif cmd_name == "remindersoff" or lower_args in {"off", "disable", "stop", "0", "no"}:
+            reply = await ladder_svc.toggle_shop_reminders(db, business, enabled=False)
+        else:
+            b_settings = dict(business.settings or {})
+            curr = "ON" if b_settings.get("reminders_enabled", True) else "OFF"
+            reply = f"ℹ️ Automated WhatsApp debt reminders are currently *{curr}* for your shop.\n\nTo change, reply:\n👉 *'reminders on'*\n👉 *'reminders off'*"
+        send_res = await self.whatsapp.send_text(phone, reply)
+        await self.ledger.record_outbound_message(db, business.id, phone, reply, send_res, user_id=user.id)
 
     async def _send_statement_picker(self, db: AsyncSession, business: Business, user: User, phone: str) -> None:
         """Sends the native WhatsApp interactive list drawer to choose statement timeframe."""
@@ -895,7 +1024,7 @@ class CommandRouter:
         stmt = (
             select(Transaction)
             .where(Transaction.business_id == business.id, Transaction.status == "confirmed")
-            .order_by(Transaction.occurred_at.desc())
+            .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
             .limit(1)
         )
         res = await db.execute(stmt)

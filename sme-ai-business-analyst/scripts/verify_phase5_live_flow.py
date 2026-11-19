@@ -67,10 +67,11 @@ async def main() -> None:
     staff_1_id = uuid4()
     staff_2_id = uuid4()
 
-    owner_a_phone = f"+234801{ts % 10000000:07d}"
-    owner_b_phone = f"+234802{ts % 10000000:07d}"
-    staff_1_phone = f"+234803{ts % 10000000:07d}"
-    staff_2_phone = f"+234804{ts % 10000000:07d}"
+    settings.is_test = True
+    owner_a_phone = f"+2340001{ts % 1000000:06d}"
+    owner_b_phone = f"+2340002{ts % 1000000:06d}"
+    staff_1_phone = f"+2340003{ts % 1000000:06d}"
+    staff_2_phone = f"+2340004{ts % 1000000:06d}"
 
     biz_a_name = f"Adversarial Test Hub A {ts}"
     biz_b_name = f"Adversarial Test Hub B {ts}"

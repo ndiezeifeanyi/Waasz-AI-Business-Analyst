@@ -2,6 +2,7 @@ import inspect
 from typing import Any
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 import logging
 import re
 
@@ -48,6 +49,7 @@ from app.services.voice_service import VoiceService
 from app.services.whatsapp_client import WhatsAppClient
 from app.services.whatsapp_parser import parse_webhook_payload, parse_webhook_statuses
 from app.services.command_router import CommandRouter
+from app.services.debtor_send_service import DebtorSendService
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,7 @@ class WhatsAppWebhookProcessor:
         self.access_control = access_control or AccessControlService(invite_service=self.invites)
         self.staff = staff or StaffService()
         self.command_router = CommandRouter(whatsapp=self.whatsapp, ledger=self.ledger)
+        self.debtor_sender = DebtorSendService(whatsapp=self.whatsapp)
         self.agent = agent or AgentService(
             ledger=self.ledger,
             extractor=self.extractor,
@@ -144,10 +147,22 @@ class WhatsAppWebhookProcessor:
             staff=self.staff,
         )
 
+    async def _process_template_events(self, db: AsyncSession, payload: dict) -> None:
+        """Inspects webhook changes for Meta template status, category, or quality updates."""
+        from app.services.debt_monitoring_service import DebtMonitoringService
+        monitoring = DebtMonitoringService(whatsapp=self.whatsapp)
+        for entry in payload.get("entry", []):
+            for change in entry.get("changes", []):
+                field = change.get("field")
+                value = change.get("value", {})
+                if field in ("message_template_status_update", "template_category_update", "message_template_quality_update"):
+                    await monitoring.handle_meta_template_status_webhook(db, field, value)
+
     async def process_payload(self, payload: dict) -> None:
         messages = parse_webhook_payload(payload)
         statuses = parse_webhook_statuses(payload)
         async with async_session_factory() as db:
+            await self._process_template_events(db, payload)
             event = await self.ledger.create_webhook_event(db, payload)
             await db.commit()
 
@@ -156,6 +171,7 @@ class WhatsAppWebhookProcessor:
                 for status_item in statuses:
                     try:
                         await self.ledger.update_message_status(db, status_item)
+                        await self.debtor_sender.handle_message_status_update(db, status_item)
                     except Exception as s_exc:
                         logger.warning("Failed to update message status for %s: %s", status_item.message_id, s_exc)
                 event.status = "processed"
@@ -215,6 +231,11 @@ class WhatsAppWebhookProcessor:
 
         # Gate logic: staff state check followed by pluggable access control
         norm_phone = normalize_phone(parsed.from_phone)
+
+        # Debtor intercept: Check if incoming message is from an active debtor responding to debt notices
+        if await self.debtor_sender.try_handle_inbound_debtor_message(db, parsed):
+            logger.info("Inbound message from %s handled as debtor action.", parsed.from_phone)
+            return
 
         # Check if caller is an invited or active staff member
         stmt_mem = select(Member).where(
@@ -478,6 +499,178 @@ class WhatsAppWebhookProcessor:
         pending = await self.confirmations.latest_actionable(
             db, business.id, member_id=actor.member_id
         )
+
+        # Check if merchant is answering a pending counter consent question for a credit sale
+        b_settings = dict(business.settings or {})
+        pending_consents = dict(b_settings.get("pending_counter_consents") or {})
+        # Support legacy single-debt key if present
+        if "pending_counter_consent" in b_settings and isinstance(b_settings["pending_counter_consent"], dict):
+            legacy_c = b_settings["pending_counter_consent"]
+            d_id = legacy_c.get("debt_id")
+            if d_id and d_id not in pending_consents:
+                pending_consents[d_id] = legacy_c
+
+        # Evict expired pending consents (2 hour window)
+        now_utc = datetime.now(UTC)
+        expired_ids = []
+        for d_id, c_data in list(pending_consents.items()):
+            exp_str = c_data.get("expires_at")
+            if exp_str:
+                try:
+                    exp_dt = datetime.fromisoformat(exp_str)
+                    if now_utc > exp_dt:
+                        expired_ids.append(d_id)
+                except Exception:
+                    pass
+        for d_id in expired_ids:
+            exp_c = pending_consents.pop(d_id, None)
+            if exp_c and parsed.body and (exp_c.get("customer_name", "").lower() in parsed.body.lower()):
+                expired_msg = (
+                    f"⚠️ The counter consent confirmation question for {exp_c.get('customer_name')} has expired. "
+                    f"No automated WhatsApp messages will be sent.\n\n"
+                    f"You can share the credit record manually anytime:\n👉 {exp_c.get('wa_link')}"
+                )
+                send_res = await self.whatsapp.send_text(parsed.from_phone, expired_msg)
+                await self.ledger.record_outbound_message(
+                    db, business.id, parsed.from_phone, expired_msg, send_res, user_id=user.id
+                )
+                b_settings["pending_counter_consents"] = pending_consents
+                b_settings.pop("pending_counter_consent", None)
+                business.settings = b_settings
+                inbound.status = "processed"
+                if hasattr(db, "commit"):
+                    await db.commit()
+                return
+
+        b_settings["pending_counter_consents"] = pending_consents
+        business.settings = b_settings
+
+        if pending_consents and not pending and parsed.body:
+            body_clean = parsed.body.strip().lower()
+            interactive_id = (parsed.interactive_reply_id or "").strip().lower()
+            effective_choice = interactive_id or body_clean
+
+            # Match pending consent by customer name in merchant's reply
+            matched_debt_id = None
+            matched_consent = None
+            for d_id, c_data in pending_consents.items():
+                c_name = (c_data.get("customer_name") or "").lower()
+                first_name = c_name.split()[0] if c_name else ""
+                if (c_name and c_name in body_clean) or (first_name and len(first_name) >= 3 and first_name in body_clean):
+                    matched_debt_id = d_id
+                    matched_consent = c_data
+                    break
+
+            from app.services.debt_recovery_service import DebtRecoveryService
+            recovery_svc = DebtRecoveryService()
+            action = normalize_confirmation_reply(parsed.body, parsed.interactive_reply_id)
+
+            is_consent_reply = action in ("confirm", "edit", "cancel") or any(
+                body_clean.startswith(w) for w in ("1", "2", "yes", "no", "agree", "disagree", "confirm", "decline")
+            )
+
+            # If merchant replied with a choice but omitted customer name, prompt for the name
+            if is_consent_reply and not matched_consent:
+                names_list = ", ".join(f"*{c.get('customer_name')}*" for c in pending_consents.values() if c.get("customer_name"))
+                prompt_msg = (
+                    f"⚠️ Please include the customer's name in your reply to confirm the correct credit record "
+                    f"(e.g. *'1 Emeka'* or *'CONFIRM Emeka'*).\n\n"
+                    f"Pending credit confirmations: {names_list}"
+                )
+                send_res = await self.whatsapp.send_text(parsed.from_phone, prompt_msg)
+                await self.ledger.record_outbound_message(db, business.id, parsed.from_phone, prompt_msg, send_res, user_id=user.id)
+                inbound.status = "processed"
+                if hasattr(db, "commit"):
+                    await db.commit()
+                return
+
+            if matched_consent:
+                debt_id_str = matched_consent.get("debt_id")
+                cust_name = matched_consent.get("customer_name") or "Customer"
+                cust_phone = matched_consent.get("customer_phone")
+                wa_link = matched_consent.get("wa_link") or ""
+                debt_uuid = UUID(debt_id_str) if debt_id_str else None
+
+                tokens = body_clean.split()
+                is_confirm = action == "confirm" or any(t in ("1", "yes", "y", "agree", "correct", "confirm") for t in tokens) or any(body_clean.startswith(w) for w in ("1", "yes", "y", "agree", "correct", "confirm"))
+                is_decline = action in ("edit", "cancel") or any(t in ("2", "no", "n", "disagree", "decline") for t in tokens) or any(body_clean.startswith(w) for w in ("2", "no", "disagree", "decline"))
+
+                if is_confirm:
+                    if debt_uuid and cust_phone:
+                        await recovery_svc.record_merchant_consent(
+                            db,
+                            business_id=business.id,
+                            debt_id=debt_uuid,
+                            debtor_phone=cust_phone,
+                            member_id=actor.member_id,
+                            wording_version="counter_v1",
+                        )
+                    dispatch_note = "Automated WhatsApp record and reminders are now active for this debt."
+                    if debt_uuid and cust_phone:
+                        send_svc = DebtorSendService(whatsapp=self.whatsapp)
+                        ok, reason, msg_rec = await send_svc.send_debtor_notice(
+                            db,
+                            business_id=business.id,
+                            debt_id=debt_uuid,
+                            stage="initial",
+                            template_name="iou_record_v2",
+                        )
+                        if ok:
+                            dispatch_note = f"Official IOU record has been dispatched to {cust_name} on WhatsApp."
+                        elif reason == "outside_sending_hours":
+                            dispatch_note = f"It is currently quiet hours. The official IOU record will be delivered to {cust_name} at 08:00 WAT."
+                        else:
+                            dispatch_note = f"Delivery attempt status: {reason}. Automated reminders are active."
+
+                    pending_consents.pop(matched_debt_id, None)
+                    b_settings["pending_counter_consents"] = pending_consents
+                    b_settings.pop("pending_counter_consent", None)
+                    business.settings = b_settings
+
+                    reply_text = (
+                        f"✅ *Consent recorded at the counter for {cust_name}.*\n"
+                        f"{dispatch_note}\n\n"
+                        f"📲 *Manual Share Option:*\n👉 {wa_link}"
+                    )
+                    send_result = await self.whatsapp.send_text(parsed.from_phone, reply_text)
+                    await self.ledger.record_outbound_message(
+                        db, business.id, parsed.from_phone, reply_text, send_result, user_id=user.id
+                    )
+                    inbound.status = "processed"
+                    if hasattr(db, "commit"):
+                        await db.commit()
+                    elif hasattr(db, "flush"):
+                        await db.flush()
+                    return
+
+                elif is_decline:
+                    if debt_uuid:
+                        await recovery_svc.record_declined_consent(
+                            db,
+                            business_id=business.id,
+                            debt_id=debt_uuid,
+                            debtor_phone=cust_phone,
+                        )
+                    pending_consents.pop(matched_debt_id, None)
+                    b_settings["pending_counter_consents"] = pending_consents
+                    b_settings.pop("pending_counter_consent", None)
+                    business.settings = b_settings
+
+                    reply_text = (
+                        f"Understood. Automatic WhatsApp messages will *NOT* be sent to {cust_name}.\n\n"
+                        f"You can still share the record manually at any time:\n👉 {wa_link}"
+                    )
+                    send_result = await self.whatsapp.send_text(parsed.from_phone, reply_text)
+                    await self.ledger.record_outbound_message(
+                        db, business.id, parsed.from_phone, reply_text, send_result, user_id=user.id
+                    )
+                    inbound.status = "processed"
+                    if hasattr(db, "commit"):
+                        await db.commit()
+                    elif hasattr(db, "flush"):
+                        await db.flush()
+                    return
+
         if pending:
             handled = await self._try_handle_confirmation_reply(db, parsed, pending)
             if handled:
@@ -587,7 +780,8 @@ class WhatsAppWebhookProcessor:
                 (parsed.interactive_reply_id or "").startswith("cmd_")
                 or (parsed.interactive_reply_id or "").startswith("stmt_")
             )
-            if not is_receipt_action and not is_command_action and (parsed.interactive_reply_id or action != "unknown"):
+            is_explicit_stale_reply = bool(parsed.interactive_reply_id) or (parsed.body or "").strip().lower() in {"1", "2", "1 yes", "2 edit"}
+            if not is_receipt_action and not is_command_action and is_explicit_stale_reply:
                 logger.info(
                     "Idempotency: confirmation reply %s (%s) received for already-resolved or absent pending confirmation. Silently no-oping.",
                     parsed.message_id,
@@ -602,6 +796,43 @@ class WhatsAppWebhookProcessor:
                 raw_image_bytes = await self.media_downloader.download(parsed.media_id)
             except Exception as exc:
                 logger.warning("Failed to download image media %s: %s", parsed.media_id, exc)
+
+            # Check if this image resolves an outstanding Step-Up Verification for Credit Limit
+            try:
+                from app.models.risk_assessment import TransactionRiskAssessment
+                cutoff_pending = datetime.now(UTC) - timedelta(hours=24)
+                pending_step_up_stmt = (
+                    select(TransactionRiskAssessment)
+                    .where(
+                        TransactionRiskAssessment.business_id == business.id,
+                        TransactionRiskAssessment.step_up_status == "pending_user_proof",
+                        TransactionRiskAssessment.evaluated_at >= cutoff_pending,
+                    )
+                    .order_by(TransactionRiskAssessment.evaluated_at.desc())
+                    .limit(1)
+                )
+                pending_step_up = (await db.execute(pending_step_up_stmt)).scalar_one_or_none()
+                if pending_step_up:
+                    pending_step_up.step_up_status = "approved"
+                    pending_step_up.is_credit_eligible = True
+                    pending_step_up.quarantine_reason = None
+                    await db.flush()
+
+                    verify_msg = (
+                        "✅ *Sale Verified for Credit Limit!*\n\n"
+                        "Thank you for providing the document. Your proof has been recorded and attached to the transaction. "
+                        "This sale is now fully verified and counts towards your Waasz Business Credit Limit."
+                    )
+                    send_result = await self.whatsapp.send_text(parsed.from_phone, verify_msg)
+                    await self.ledger.record_outbound_message(
+                        db, business.id, parsed.from_phone, verify_msg, send_result, user_id=user.id
+                    )
+                    inbound.status = "processed"
+                    if hasattr(db, "commit"):
+                        await db.commit()
+                    return
+            except Exception as step_up_err:
+                logger.warning("Error checking step-up verification for image: %s", step_up_err)
 
         try:
             source_text = await self._source_text(parsed, image_bytes=raw_image_bytes)
@@ -669,10 +900,10 @@ class WhatsAppWebhookProcessor:
         lower_text = source_text.strip().lower()
         is_receipt_request = (
             interactive_id.startswith("receipt_")
-            or lower_text in {"send receipt", "receipt", "📄 send receipt", "iou", "send iou", "invoice", "send invoice"}
-            or ("receipt" in lower_text and any(w in lower_text for w in ["send", "where", "get", "give", "show", "see", "pdf", "my", "the", "even"]))
-            or ("iou" in lower_text and any(w in lower_text for w in ["send", "where", "get", "give", "show", "see", "pdf", "my", "the", "even"]))
-            or ("invoice" in lower_text and any(w in lower_text for w in ["send", "where", "get", "give", "show", "see", "pdf", "my", "the", "even"]))
+            or (parsed.message_type != "audio" and lower_text in {"send receipt", "receipt", "📄 send receipt", "send my receipt", "send the receipt", "get receipt", "pdf receipt", "iou", "send iou", "send the iou", "invoice", "send invoice", "send the invoice", "send my invoice"})
+
+
+            or (parsed.message_type != "audio" and len(lower_text.split()) <= 6 and not lower_text.endswith("?") and "same receipt" not in lower_text and any(p in lower_text for p in ("send receipt", "send the receipt", "send my receipt", "send invoice", "send the invoice", "send iou", "send the iou")))
         )
         if is_receipt_request:
             target_tx_id = None
@@ -686,9 +917,15 @@ class WhatsAppWebhookProcessor:
             receipt_svc = ReceiptService()
             scoped_mem_id = actor.member_id if (actor and actor.role == "staff") else None
             try:
-                pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
-                    db, business_id=business.id, transaction_id=target_tx_id, member_id=scoped_mem_id
-                )
+                want_credit = True if (not target_tx_id and ("iou" in lower_text or "invoice" in lower_text)) else None
+                try:
+                    pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
+                        db, business_id=business.id, transaction_id=target_tx_id, member_id=scoped_mem_id, credit_only=want_credit
+                    )
+                except ValueError:
+                    pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
+                        db, business_id=business.id, transaction_id=target_tx_id, member_id=scoped_mem_id, credit_only=None
+                    )
                 caption = f"📄 {'Invoice' if tx.is_credit else 'Receipt'} #{filename.replace('.pdf', '')}"
                 send_result = await self.whatsapp.send_document_bytes(
                     parsed.from_phone, pdf_bytes, filename=filename, caption=caption
@@ -770,7 +1007,7 @@ class WhatsAppWebhookProcessor:
                     Transaction.transaction_type == "sale",
                     Transaction.status == "confirmed",
                 )
-                .order_by(Transaction.occurred_at.desc())
+                .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
                 .limit(1)
             )
             tx_res = await db.execute(tx_stmt)
@@ -1054,7 +1291,6 @@ class WhatsAppWebhookProcessor:
         # Check for reminder time reply
         last_outbound = await self._get_last_outbound(db, business.id)
         if last_outbound and "What time should I remind you?" in (last_outbound.body or ""):
-            from app.services.task_service import TaskService
             from app.utils.reminder_parser import format_confirmation_time, parse_reminder_time
 
             business_tz = getattr(business, "timezone", None) or settings.local_timezone
@@ -1431,7 +1667,6 @@ class WhatsAppWebhookProcessor:
             return None
 
         from app.models.task import Task
-        from uuid import UUID
 
         task = None
         target_uuid = None

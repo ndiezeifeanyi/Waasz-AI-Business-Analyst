@@ -28,26 +28,13 @@ class WhatsAppClient:
         return await self._post(payload)
 
     async def send_confirmation(self, to_phone: str, body: str) -> WhatsAppSendResult:
-        if not self._is_configured:
-            return WhatsAppSendResult(
-                skipped=True, error_message="WhatsApp credentials are not set"
-            )
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": to_phone,
-            "type": "interactive",
-            "interactive": {
-                "type": "button",
-                "body": {"text": body},
-                "action": {
-                    "buttons": [
-                        {"type": "reply", "reply": {"id": "1", "title": "1 Yes"}},
-                        {"type": "reply", "reply": {"id": "2", "title": "2 Edit"}},
-                    ]
-                },
-            },
-        }
-        return await self._post(payload)
+        """Send an interactive confirmation prompt, splitting/falling back if body exceeds 1024 chars."""
+        return await self.send_interactive_buttons(
+            to_phone,
+            body,
+            [("1", "1 Yes"), ("2", "2 Edit")],
+            overflow_prompt="Please confirm or edit the record above:",
+        )
 
     async def send_alarm_reminder(
         self, to_phone: str, body: str, task_id: str | None = None
@@ -146,7 +133,11 @@ class WhatsAppClient:
         return await self.send_document(to_phone, media_id, filename, caption)
 
     async def send_interactive_buttons(
-        self, to_phone: str, body: str, buttons: list[tuple[str, str]]
+        self,
+        to_phone: str,
+        body: str,
+        buttons: list[tuple[str, str]],
+        overflow_prompt: str = "📄 Tap below to view your official document:",
     ) -> WhatsAppSendResult:
         """Send a message with custom quick-reply buttons (id, label)."""
         if not self._is_configured:
@@ -170,11 +161,12 @@ class WhatsAppClient:
                 "type": "interactive",
                 "interactive": {
                     "type": "button",
-                    "body": {"text": "📄 Tap below to view your official document:"},
+                    "body": {"text": overflow_prompt[:1024]},
                     "action": {"buttons": btn_payloads},
                 },
             }
-            return await self._post(prompt_payload)
+            prompt_res = await self._post(prompt_payload)
+            return prompt_res if prompt_res.success else text_res
 
         payload = {
             "messaging_product": "whatsapp",
@@ -269,6 +261,16 @@ class WhatsAppClient:
         return bool(settings.whatsapp_access_token and settings.whatsapp_phone_number_id)
 
     async def _post(self, payload: dict) -> WhatsAppSendResult:
+        if getattr(settings, "is_test", False):
+            import time
+            to_phone = payload.get("to", "unknown")
+            msg_type = payload.get("type", "unknown")
+            logger.info("[IS_TEST=True] Real WhatsApp send blocked for %s (type: %s). Simulated send.", to_phone, msg_type)
+            return WhatsAppSendResult(
+                message_id=f"wamid.test_simulated_{int(time.time())}",
+                success=True,
+            )
+
         headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
         async with httpx.AsyncClient(timeout=20) as client:
             try:

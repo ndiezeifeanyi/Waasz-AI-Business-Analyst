@@ -79,7 +79,7 @@ class DebtReceiptPdfService:
                     Transaction.is_credit.is_(True),
                     Transaction.status == "confirmed",
                 )
-                .order_by(Transaction.occurred_at.desc())
+                .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
                 .limit(1)
             )
             target_tx = (await db.execute(t_stmt)).scalar_one_or_none()

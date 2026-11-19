@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 
-from app.api.routes import admin, client_dashboard, google_drive, health, shortlinks, whatsapp
+from app.api.routes import admin, client_dashboard, debt_details, google_drive, health, shortlinks, whatsapp
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.core.security_middleware import setup_security_middleware
@@ -52,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(client_dashboard.router)
     app.include_router(google_drive.router)
     app.include_router(shortlinks.router)
+    app.include_router(debt_details.router)
  
     # Backward compatibility redirect for legacy webhook-prefixed dashboard links
     @app.get("/webhooks/whatsapp/reports/dashboard/{token}", include_in_schema=False)

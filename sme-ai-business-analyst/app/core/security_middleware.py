@@ -36,8 +36,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Content-Type-Options"] = "nosniff"
         # Enable XSS protection
         response.headers["X-XSS-Protection"] = "1; mode=block"
-        # Referrer policy
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # Referrer policy: strict no-referrer for /r/ debtor details proxy routes, default otherwise
+        if request.url.path.startswith("/r/"):
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        else:
+            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         # Permissions policy
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
         # Content Security Policy (allow Chart.js CDN and inline scripts/styles for dashboard)

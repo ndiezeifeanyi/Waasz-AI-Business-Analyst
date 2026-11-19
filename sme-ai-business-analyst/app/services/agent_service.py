@@ -123,7 +123,9 @@ class CorrectStockLevelInput(BaseModel):
 class GenerateReceiptInput(BaseModel):
     """Generate and deliver an official PDF receipt (for cash/transfer sale) or invoice (for credit sale) directly to the user's WhatsApp. Call ONLY when the user explicitly requests a receipt or invoice (e.g. 'generate my receipt', 'send receipt', 'receipt please', 'invoice'). DO NOT call this tool when the user is asking for charts, trend graphs, performance summaries, or dashboards."""
     model_config = {"title": "generate_receipt"}
-    transaction_id: str | None = Field(default=None, description="Optional UUID of the specific transaction. Leave None/omitted to automatically use the most recent confirmed sale.")
+    transaction_id: str | None = Field(default=None, description="Optional UUID of the specific transaction (from get_recent_transactions [tx_id=...]). Leave None/omitted to automatically use the most recent confirmed sale.")
+    item_name: str | None = Field(default=None, description="Optional item name to match if the user asked for a specific item's receipt (e.g. 'Rice', 'Oil pump', 'Book') and transaction_id is omitted.")
+    customer_name: str | None = Field(default=None, description="Optional customer name to match if the user asked for a specific customer's receipt/invoice (e.g. 'Debby', 'John').")
 
 
 class SetReceiptTemplateInput(BaseModel):
@@ -540,10 +542,14 @@ class AgentService:
             "### WHATSAPP FORMATTING & CONVERSATIONAL RULES (STRICT):\n"
             "- NATURAL HUMAN CONVERSATION: Talk naturally like an expert Nigerian business partner. NEVER act like an automated telephone menu or quiz machine.\n"
             "- NO FORCED MULTIPLE-CHOICE QUIZZES: NEVER output rigid option blocks like 'Pick one exact phrase to proceed: • Option A • Option B'. Merchants hate this. If you need confirmation, simply ask naturally: 'Shall I send this notice to Nmesoma now?'\n"
-            "- CONCISE LENGTH: Keep responses to 2 to 4 sentences maximum. Avoid sending essays or overwhelming walls of text.\n"
-            "- ZERO MARKDOWN HEADERS: NEVER use markdown headers (no '#', '##', or '###').\n"
+            "- CONCISE & STRUCTURED RESPONSES: For standard confirmations or simple queries, keep responses to 2 to 3 crisp sentences. DO NOT write dense, unbroken blocks of run-on text.\n"
+            "- DASHBOARD & FINANCIAL AUDIT FORMATTING (CRITICAL): When summarizing a merchant's dashboard, business health, credit score, margins, or overall performance, NEVER dump multiple metrics into one long run-on paragraph separated by semicolons. ALWAYS format using clean line breaks and bullet points:\n"
+            "  * Lead with a clear header (e.g. '📊 *Business Health & Dashboard Overview*')\n"
+            "  * Use clean bullets ('• ') for each metric: Credit Score & Streak, 30-Day Sales & Expenses, Outstanding Debts, Inventory & Margins.\n"
+            "  * End with one clear, friendly follow-up action.\n"
+            "- ZERO MARKDOWN HEADERS: NEVER use markdown headers (no '#', '##', or '###'). Use bold text like '*Summary*' instead.\n"
             "- AVOID ASTERISK CLUTTER: Use single *asterisks* for bold sparingly.\n"
-            "- CLEAN LISTS: If listing 2-3 items, use simple bullet '• '.\n"
+            "- CLEAN LISTS: Use simple bullet '• ' with a single blank line between major sections for mobile readability.\n"
             "- NEVER CLAIM UNVERIFIED BANK APPROVAL: Never claim a document is 'bank stamped' or 'certified by banks'. Describe it objectively as a formal 'Financial Health Report' or 'Statement'.\n"
             "- DEBT NOTIFICATIONS & IOU POLICY (CRITICAL): Meta WhatsApp API strictly blocks automated business messages to external phone numbers outside the 24-hour service window (Error 131047). If a merchant says a debtor did not receive a message, NEVER argue, dispute them, or claim 'my records show it was delivered'. When dispatching or discussing an IOU or debt notice, ALWAYS call `dispatch_debt_notice` and present the direct 1-tap WhatsApp forwarding link (`https://wa.me/...`) so the merchant can guarantee instant delivery directly from their own WhatsApp.\n"
             "- PROACTIVE DIGITAL IOU: When a merchant asks about an IOU or debt, provide the exact debt details and the 1-tap WhatsApp share link immediately in 1 concise message—do not drag the merchant into unnecessary back-and-forth multi-turn questioning.\n\n"
@@ -1286,7 +1292,7 @@ class AgentService:
                         Transaction.transaction_type == "sale",
                         Transaction.status == "confirmed",
                     )
-                    .order_by(Transaction.occurred_at.desc())
+                    .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
                     .limit(1)
                 )
                 tx_res = await db.execute(tx_stmt)
@@ -1349,7 +1355,7 @@ class AgentService:
                         Transaction.transaction_type == "sale",
                         Transaction.status == "confirmed",
                     )
-                    .order_by(Transaction.occurred_at.desc())
+                    .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
                     .limit(1)
                 )
                 tx_res = await db.execute(tx_stmt)
@@ -1396,8 +1402,42 @@ class AgentService:
 
                 receipt_svc = ReceiptService()
                 tx_id_str = tool_args.get("transaction_id")
-                target_tx_id = UUID(tx_id_str) if tx_id_str else None
+                item_filter = (tool_args.get("item_name") or "").strip().lower()
+                cust_filter = (tool_args.get("customer_name") or "").strip().lower()
+                target_tx_id = None
+                if tx_id_str:
+                    try:
+                        target_tx_id = UUID(str(tx_id_str).strip())
+                    except Exception:
+                        if not item_filter:
+                            item_filter = str(tx_id_str).strip().lower()
+
                 scoped_mem_id = actor.member_id if (actor and actor.role == "staff") else None
+                if not target_tx_id and (item_filter or cust_filter):
+                    search_stmt = (
+                        select(Transaction)
+                        .where(
+                            Transaction.business_id == business.id,
+                            Transaction.transaction_type == "sale",
+                            Transaction.status == "confirmed",
+                        )
+                        .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
+                        .limit(25)
+                    )
+                    if scoped_mem_id:
+                        search_stmt = search_stmt.where(Transaction.created_by_member_id == scoped_mem_id)
+                    cand_rows = (await db.execute(search_stmt)).scalars().all()
+                    for cand in cand_rows:
+                        c_item = (cand.item_name or cand.description or "").lower()
+                        if item_filter and item_filter in c_item:
+                            target_tx_id = cand.id
+                            break
+                        if cust_filter and cand.customer_id:
+                            cust_obj = await db.get(Customer, cand.customer_id)
+                            if cust_obj and cust_filter in (cust_obj.name or "").lower():
+                                target_tx_id = cand.id
+                                break
+
                 try:
                     pdf_bytes, filename, tx = await receipt_svc.generate_receipt_pdf(
                         db, business_id=business.id, transaction_id=target_tx_id, member_id=scoped_mem_id
@@ -1410,7 +1450,10 @@ class AgentService:
                         db, business.id, user.phone_number, f"[Sent document {filename}]", send_res, user_id=user.id
                     )
                     doc_type = "Invoice" if tx.is_credit else "Receipt"
-                    return f"Success: {doc_type} PDF '{filename}' generated and delivered to user's WhatsApp.", False
+                    return (
+                        f"Success: {doc_type} PDF '{filename}' for '{tx.item_name or tx.description or 'sale'}' (₦{tx.amount:,.2f}) generated and delivered to user's WhatsApp.",
+                        False,
+                    )
                 except ValueError as ve:
                     return f"Error: {str(ve)}", False
                 except Exception as exc:
@@ -1981,7 +2024,7 @@ class AgentService:
                 if rec_type in {"sale", "expense"}:
                     tx_stmt = tx_stmt.where(Transaction.transaction_type == rec_type)
 
-                tx_stmt = tx_stmt.order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc()).limit(limit_val)
+                tx_stmt = tx_stmt.order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc()).limit(limit_val)
                 tx_rows = (await db.execute(tx_stmt)).scalars().all()
 
                 if not tx_rows:
@@ -1996,7 +2039,7 @@ class AgentService:
                     qty_str = f" ({t.quantity:g} {t.unit or ''})".strip() if t.quantity else ""
                     amt_str = f"₦{t.amount:,.2f}" if t.amount else "₦0.00"
                     method_str = " [Credit]" if t.is_credit else ""
-                    lines.append(f"• {dt_str} | {t_type}: {item_str}{qty_str} - {amt_str}{method_str}")
+                    lines.append(f"• [tx_id={t.id}] {dt_str} | {t_type}: {item_str}{qty_str} - {amt_str}{method_str}")
                 return "\n".join(lines), False
 
             elif tool_name == "update_transaction":
@@ -2027,7 +2070,7 @@ class AgentService:
                                 Transaction.business_id == business.id,
                                 Transaction.status == "confirmed",
                             )
-                            .order_by(Transaction.occurred_at.desc())
+                            .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
                         )
                         all_txs = (await db.execute(tx_stmt)).scalars().all()
                         for cand in all_txs:
@@ -2053,7 +2096,7 @@ class AgentService:
                     )
                     if actor and actor.role == "staff":
                         tx_stmt = tx_stmt.where(Transaction.created_by_member_id == actor.member_id)
-                    tx_stmt = tx_stmt.order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc()).limit(1)
+                    tx_stmt = tx_stmt.order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc()).limit(1)
                     tx_res = await db.execute(tx_stmt)
                     target_tx = tx_res.scalar_one_or_none()
 
@@ -2126,7 +2169,7 @@ class AgentService:
                             Transaction.transaction_type == "sale",
                             Transaction.status == "confirmed",
                         )
-                        .order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc())
+                        .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
                         .limit(1)
                     )
                     tx_res = await db.execute(tx_stmt)

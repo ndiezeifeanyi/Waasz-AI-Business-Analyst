@@ -138,3 +138,62 @@ async def test_duplicate_wamid_inbound_is_idempotent() -> None:
     inbound2 = await service.record_inbound_message(mock_db, parsed, biz, user)
     assert is_duplicate_message(inbound2)
 
+
+@pytest.mark.asyncio
+async def test_send_confirmation_splits_long_body_over_1024_chars(monkeypatch):
+    """Batch confirmations > 1024 chars must send plain text first, then short interactive buttons."""
+    from unittest.mock import AsyncMock
+    from app.schemas.whatsapp import WhatsAppSendResult
+    from app.services.whatsapp_client import WhatsAppClient
+
+    client = WhatsAppClient()
+    monkeypatch.setattr(WhatsAppClient, "_is_configured", property(lambda self: True))
+    client._post = AsyncMock(
+        side_effect=[
+            WhatsAppSendResult(message_id="wamid.text_1", success=True),
+            WhatsAppSendResult(message_id="wamid.btn_1", success=True),
+        ]
+    )
+
+    long_body = "Please confirm 30 item sales:\n" + ("1. Spare part item - ₦25,000\n" * 40)
+    assert len(long_body) > 1024
+
+    res = await client.send_confirmation("2347065015924", long_body)
+    assert res.success is True
+    assert client._post.await_count == 2
+
+    first_payload = client._post.await_args_list[0].args[0]
+    second_payload = client._post.await_args_list[1].args[0]
+    assert first_payload["type"] == "text"
+    assert first_payload["text"]["body"] == long_body
+    assert second_payload["type"] == "interactive"
+    assert len(second_payload["interactive"]["body"]["text"]) <= 1024
+    assert [b["reply"]["id"] for b in second_payload["interactive"]["action"]["buttons"]] == ["1", "2"]
+
+
+@pytest.mark.asyncio
+async def test_send_confirmation_falls_back_to_text_on_131009(monkeypatch):
+    """If Meta rejects interactive confirmation with #131009, fall back to plain text."""
+    from unittest.mock import AsyncMock
+    from app.schemas.whatsapp import WhatsAppSendResult
+    from app.services.whatsapp_client import WhatsAppClient
+
+    client = WhatsAppClient()
+    monkeypatch.setattr(WhatsAppClient, "_is_configured", property(lambda self: True))
+    client._post = AsyncMock(
+        side_effect=[
+            WhatsAppSendResult(
+                error_message="Meta Error (400): (#131009) Parameter value is not valid",
+                success=False,
+            ),
+            WhatsAppSendResult(message_id="wamid.fallback_1", success=True),
+        ]
+    )
+
+    short_body = "Sold 1 bag of rice for ₦80,000. Reply 1=Yes, 2=Edit, 3=Cancel."
+    res = await client.send_confirmation("2347065015924", short_body)
+    assert res.success is True
+    assert res.message_id == "wamid.fallback_1"
+    assert client._post.await_args_list[1].args[0]["type"] == "text"
+
+

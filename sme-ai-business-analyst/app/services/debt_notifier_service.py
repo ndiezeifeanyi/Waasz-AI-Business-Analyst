@@ -43,19 +43,20 @@ class DebtNotifierService:
             return "234" + digits
         return digits
 
-    def _get_merchant_bank_info(self, biz: Business) -> str:
-        """Extracts merchant's bank account details from business settings."""
+    def _get_merchant_bank_info(self, biz: Business, payment_terms_note: str | None = None) -> str:
+        """Extracts merchant's bank account details from business settings or receipt template."""
         settings_dict = biz.settings or {}
         bank_name = settings_dict.get("bank_name") or settings_dict.get("settlement_bank")
         account_number = settings_dict.get("account_number") or settings_dict.get("settlement_account")
         account_name = settings_dict.get("account_name") or biz.name
 
         if bank_name and account_number:
-            return f"Bank: {bank_name} | Account: {account_number} ({account_name})"
+            return f"{bank_name} - {account_number} ({account_name})"
         
-        # Designated institutional settlement account
-        biz_id_short = str(biz.id).replace("-", "")[:8].upper()
-        return f"Designated Merchant Settlement Account ({biz.name}) // Quote Ref #{biz_id_short}"
+        if payment_terms_note and any(c.isdigit() for c in payment_terms_note):
+            return payment_terms_note.strip()
+        
+        return f"Contact {biz.name} directly for designated settlement account"
 
     def build_notice_text(
         self,
@@ -84,11 +85,12 @@ class DebtNotifierService:
                 f"• *Balance Due:* *{amount_fmt}*\n"
                 f"• *Maturity / Due Date:* *{due_date_str}*\n"
                 f"• Interest Structure: 0.0% APR (Fixed Default)\n"
-                f"• Facility Type: Commercial Accounts Receivable\n\n"
-                f"💳 *Online Payment Gateway Checkout:*\n"
-                f"👉 https://pay.waasz.com/settle/{ref_code}\n\n"
-                f"📄 *Download Official PDF Debt Receipt:*\n"
-                f"👉 https://docs.waasz.com/receipts/iou/{ref_code}.pdf\n\n"
+                f"💳 *Settlement Details:*\n"
+                f"{bank_info}\n\n"
+                f"📄 *View & Download Official Invoice (PDF):*\n"
+                f"👉 https://waasz-sme-api.duckdns.org/i/{ref_code}/pdf\n\n"
+                f"🔗 *Online Verification Card:*\n"
+                f"👉 https://waasz-sme-api.duckdns.org/i/{ref_code}\n\n"
                 f"🔒 *Security Note:* This ledger entry is cryptographically timestamped and immutable "
                 f"under the Waasz Enterprise Registry."
             )
@@ -167,7 +169,14 @@ class DebtNotifierService:
         else:
             effective_due = (debt.created_at or datetime.now(UTC)) + timedelta(days=14)
             due_date_str = f"{effective_due.strftime('%d %b %Y')} (Net-14)"
-        bank_info = self._get_merchant_bank_info(biz)
+        # Check if ReceiptTemplate has bank info if biz.settings is missing it
+        from app.models.receipt_template import ReceiptTemplate
+        tmpl_stmt = select(ReceiptTemplate).where(ReceiptTemplate.business_id == biz.id).limit(1)
+        tmpl_res = await db.execute(tmpl_stmt)
+        tmpl_record = tmpl_res.scalar_one_or_none()
+        payment_terms = tmpl_record.payment_terms_note if tmpl_record else None
+
+        bank_info = self._get_merchant_bank_info(biz, payment_terms_note=payment_terms)
         ref_code = f"WZ-{str(debt.id).split('-')[0].upper()}"
 
         notice_body = self.build_notice_text(
@@ -181,54 +190,103 @@ class DebtNotifierService:
         )
 
         # Dispatch via WhatsApp to the debtor:
-        # First attempt via official Meta Utility Template (bypasses 24h window).
-        # Fall back to direct text if inside 24h or if template is not yet registered.
-        template_components = [
-            {
-                "type": "body",
-                "parameters": [
-                    {"type": "text", "text": ref_code},
-                    {"type": "text", "text": customer.name},
-                    {"type": "text", "text": biz.name},
-                    {"type": "text", "text": format_naira(debt.amount)},
-                    {"type": "text", "text": due_date_str},
-                    {"type": "text", "text": bank_info},
-                ],
-            }
+        # First attempt via official Meta Utility Template with Document Header
+        pdf_url = f"https://waasz-sme-api.duckdns.org/i/{ref_code}/pdf"
+        body_params = [
+            {"type": "text", "text": ref_code},
+            {"type": "text", "text": customer.name},
+            {"type": "text", "text": biz.name},
+            {"type": "text", "text": format_naira(debt.amount)},
+            {"type": "text", "text": due_date_str},
+            {"type": "text", "text": bank_info},
         ]
-        # Attempt delivery with v2 first, then fallback to v1 across both en and en_US
-        send_res = None
-        for tmpl in ["merchant_credit_iou_v2", "merchant_credit_iou_v1"]:
-            for lang in ["en", "en_US"]:
-                send_res = await self.whatsapp.send_template(
-                    debtor_phone,
-                    template_name=tmpl,
-                    language_code=lang,
-                    components=template_components,
-                )
-                if send_res.success:
-                    break
-            if send_res and send_res.success:
-                break
+        doc_header = {
+            "type": "header",
+            "parameters": [
+                {
+                    "type": "document",
+                    "document": {
+                        "link": pdf_url,
+                        "filename": f"Invoice_IOU_{ref_code}.pdf",
+                    },
+                }
+            ],
+        }
 
-        # Fallback to direct text if templates are unavailable or rejected
-        if not send_res or not send_res.success:
-            err = send_res.error_message if send_res else "No response"
-            logger.info("Template not available (%s); falling back to direct text", err)
-            send_res = await self.whatsapp.send_text(debtor_phone, notice_body)
-        
+        # Phase 5: Route through DebtorSendService with v2 utility templates and 6 strict sending gates
+        from app.services.debtor_send_service import DebtorSendService
+        from app.services.debt_recovery_service import DebtRecoveryService
+
+        recovery_svc = DebtRecoveryService()
+        send_svc = DebtorSendService(whatsapp=self.whatsapp)
+
+        stage_map = {
+            1: ("initial", "iou_record_v2"),
+            2: ("due_today", "iou_due_today_v2"),
+            3: ("overdue", "iou_overdue_v2"),
+            4: ("final_notice", "iou_final_notice_v2"),
+        }
+        stage_name, tmpl_name = stage_map.get(stage, ("overdue", "iou_overdue_v2"))
+
+        # Ensure merchant consent is recorded if merchant triggered dispatch
+        has_consent = await recovery_svc.has_debtor_consent(db, biz.id, debt.id)
+        if not has_consent:
+            await recovery_svc.record_merchant_consent(
+                db,
+                business_id=biz.id,
+                debt_id=debt.id,
+                debtor_phone=debtor_phone,
+                wording_version="manual_dispatch_v1",
+            )
+
+        ok, reason, msg_rec = await send_svc.send_debtor_notice(
+            db,
+            business_id=biz.id,
+            debt_id=debt.id,
+            stage=stage_name,
+            template_name=tmpl_name,
+        )
+
+        send_success = ok
+        err_msg = None if ok else reason
+        wamid = msg_rec.whatsapp_message_id if msg_rec else None
+
+        # Deliver Credit Sale Invoice PDF if available
+        pdf_bytes = None
+        invoice_filename = None
+        invoice_sent = False
+        if debt.transaction_id:
+            try:
+                from app.services.receipt_service import ReceiptService
+                receipt_svc = ReceiptService()
+                pdf_bytes, invoice_filename, _ = await receipt_svc.generate_receipt_pdf(
+                    db, business_id=biz.id, transaction_id=debt.transaction_id
+                )
+                caption = (
+                    f"📄 Commercial Invoice #{ref_code} — {biz.name}\n"
+                    f"Amount Due: {format_naira(debt.amount)} | Due: {due_date_str}\n"
+                    f"Bank: {bank_info}"
+                )[:1024]
+                doc_res = await self.whatsapp.send_document_bytes(
+                    debtor_phone, pdf_bytes, filename=invoice_filename, caption=caption
+                )
+                if doc_res.success:
+                    invoice_sent = True
+            except Exception as e:
+                logger.warning("Could not auto-generate or send invoice PDF for debtor: %s", e)
+
         # Record into whatsapp_messages table for full audit and visibility
         try:
             out_msg = WhatsAppMessage(
                 business_id=biz.id,
                 direction="outbound",
                 to_phone=debtor_phone,
-                message_type="text",
+                message_type="template",
                 body=notice_body,
-                whatsapp_message_id=send_res.message_id,
-                status="sent" if send_res.success else "failed",
-                error_message=send_res.error_message,
-                sent_at=datetime.now(UTC) if send_res.success else None,
+                whatsapp_message_id=wamid,
+                status="accepted" if send_success else "failed",
+                error_message=err_msg,
+                sent_at=datetime.now(UTC) if send_success else None,
             )
             db.add(out_msg)
         except Exception as e:
@@ -245,7 +303,7 @@ class DebtNotifierService:
             stage,
             debt_id,
             debtor_phone,
-            send_res.success,
+            send_success,
         )
 
         from app.utils.url_helper import get_short_iou_url
@@ -253,7 +311,7 @@ class DebtNotifierService:
         wa_link = f"https://wa.me/{debtor_phone}?text={urllib.parse.quote(notice_body)}"
 
         return {
-            "status": "sent" if send_res.success else "queued_or_failed",
+            "status": "accepted" if send_success else "queued_or_failed",
             "debtor_name": customer.name,
             "debtor_phone": debtor_phone,
             "amount": debt.amount,
@@ -262,8 +320,11 @@ class DebtNotifierService:
             "notice_text": notice_body,
             "wa_link": wa_link,
             "short_link": short_link,
-            "success": send_res.success,
-            "error": send_res.error_message,
+            "success": send_success,
+            "error": err_msg,
+            "invoice_sent": invoice_sent,
+            "invoice_filename": invoice_filename,
+            "pdf_bytes": pdf_bytes,
         }
 
     async def trigger_notice_by_customer_name(
@@ -336,13 +397,24 @@ class DebtNotifierService:
         }
         label = stage_labels.get(stage, f"Stage {stage} Notice")
 
+        if res.get("success"):
+            inv_note = " and Commercial Invoice PDF have been dispatched" if res.get("invoice_sent") else " has been dispatched"
+            return (
+                f"✅ *Official {label} Delivered!*\n\n"
+                f"• *Debtor:* {res['debtor_name']} ({res['debtor_phone']})\n"
+                f"• *Amount:* {format_naira(res['amount'])}\n"
+                f"• *Ref Code:* #{res['ref_code']}\n\n"
+                f"🚀 Official IOU notice{inv_note} directly to {res['debtor_name']} on WhatsApp!\n\n"
+                f"🔗 *Debtor Verification Link:* {res.get('short_link')}"
+            )
+
         return (
             f"✅ *Official {label} Processed!*\n\n"
             f"• *Debtor:* {res['debtor_name']} ({res['debtor_phone']})\n"
             f"• *Amount:* {format_naira(res['amount'])}\n"
             f"• *Ref Code:* #{res['ref_code']}\n\n"
             f"📲 *1-Tap Direct WhatsApp Delivery:*\n"
-            f"Because WhatsApp blocks automated messages to contacts that haven't messaged this business line first (Meta 24h Policy), tap below to send the official IOU straight from your WhatsApp with 100% guaranteed delivery:\n"
+            f"Tap below to send the official IOU straight to {res['debtor_name']} on WhatsApp:\n"
             f"👉 {res.get('short_link') or res['wa_link']}\n\n"
             f"📄 *Notice Content:*\n"
             f"{res['notice_text']}"

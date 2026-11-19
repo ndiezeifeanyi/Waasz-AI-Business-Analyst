@@ -131,7 +131,7 @@ class ReceiptService:
                 tx_stmt = tx_stmt.where(Transaction.is_credit.is_(True))
             elif credit_only is False:
                 tx_stmt = tx_stmt.where(Transaction.is_credit.is_(False))
-            tx_stmt = tx_stmt.order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc()).limit(1)
+            tx_stmt = tx_stmt.order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc()).limit(1)
             tx_res = await db.execute(tx_stmt)
             primary_tx = tx_res.scalar_one_or_none()
             if primary_tx:
@@ -164,7 +164,7 @@ class ReceiptService:
                 tx_stmt = tx_stmt.where(Transaction.is_credit.is_(True))
             elif credit_only is False:
                 tx_stmt = tx_stmt.where(Transaction.is_credit.is_(False))
-            tx_stmt = tx_stmt.order_by(Transaction.occurred_at.desc(), Transaction.created_at.desc()).limit(1)
+            tx_stmt = tx_stmt.order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc()).limit(1)
             tx_res = await db.execute(tx_stmt)
             primary_tx = tx_res.scalar_one_or_none()
             if primary_tx:
@@ -246,11 +246,11 @@ class ReceiptService:
                     break
 
         # 6. Build PDF in memory
-        doc_type = "INVOICE" if is_credit else "RECEIPT"
+        doc_type = "COMMERCIAL INVOICE & IOU" if is_credit else "RECEIPT"
         ref_id = transaction.confirmation_id or transaction.ai_extraction_id or transaction.id
         short_id = str(ref_id).replace("-", "")[:8].upper()
         doc_number = f"INV-{short_id}" if is_credit else f"REC-{short_id}"
-        filename = f"{doc_type.lower()}_{short_id}.pdf"
+        filename = f"invoice_iou_{short_id}.pdf" if is_credit else f"receipt_{short_id}.pdf"
 
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(
@@ -269,8 +269,8 @@ class ReceiptService:
             "DocTitle",
             parent=styles["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=22,
-            leading=26,
+            fontSize=16 if is_credit else 22,
+            leading=20 if is_credit else 26,
             textColor=colors.HexColor("#1e3a8a") if not is_credit else colors.HexColor("#b45309"),
             alignment=2,  # Right aligned
         )
@@ -617,11 +617,19 @@ class ReceiptService:
         elements.append(items_table)
         elements.append(Spacer(1, 16))
 
-        # --- Payment Terms & Bank Details (if configured on template) ---
-        if payment_terms:
+        # --- Payment Terms & Bank Details (if configured on template or business settings) ---
+        effective_terms = payment_terms
+        if not effective_terms and biz and biz.settings:
+            b_bank = biz.settings.get("bank_name") or biz.settings.get("settlement_bank")
+            b_acct = biz.settings.get("account_number") or biz.settings.get("settlement_account")
+            b_owner = biz.settings.get("account_name") or biz.name
+            if b_bank and b_acct:
+                effective_terms = f"Bank: {b_bank} | Account Number: {b_acct} ({b_owner})"
+
+        if effective_terms:
             terms_data = [
                 [Paragraph("<b>Payment Terms & Bank Details:</b>", section_heading)],
-                [Paragraph(payment_terms, body_text)],
+                [Paragraph(effective_terms, body_text)],
             ]
             terms_table = Table(terms_data, colWidths=[540])
             terms_table.setStyle(
@@ -634,7 +642,96 @@ class ReceiptService:
                 ])
             )
             elements.append(terms_table)
-            elements.append(Spacer(1, 12))
+            elements.append(Spacer(1, 10))
+
+        # --- Legal IOU & Debt Obligation Covenant (Credit Sales only) ---
+        if is_credit:
+            covenant_heading = ParagraphStyle(
+                "CovenantHead",
+                parent=styles["Normal"],
+                fontName="Helvetica-Bold",
+                fontSize=9.5,
+                leading=12,
+                textColor=colors.HexColor("#92400e"),
+            )
+            covenant_text_style = ParagraphStyle(
+                "CovenantText",
+                parent=styles["Normal"],
+                fontName="Helvetica",
+                fontSize=8,
+                leading=11,
+                textColor=colors.HexColor("#1f2937"),
+            )
+            covenant_sub_style = ParagraphStyle(
+                "CovenantSub",
+                parent=styles["Normal"],
+                fontName="Helvetica-Bold",
+                fontSize=7.5,
+                leading=9.5,
+                textColor=colors.HexColor("#4b5563"),
+            )
+            covenant_meta_style = ParagraphStyle(
+                "CovenantMeta",
+                parent=styles["Normal"],
+                fontName="Helvetica",
+                fontSize=7.5,
+                leading=9.5,
+                textColor=colors.HexColor("#374151"),
+            )
+
+            covenant_body = (
+                f"<b>1. OBLIGATION ACKNOWLEDGEMENT:</b> The Debtor (<b>{cust_name}</b>) acknowledges receipt in full of the "
+                f"goods/services itemized above from <b>{biz_name}</b>, and unconditionally undertakes to remit the total outstanding "
+                f"balance of <b>{total_str}</b> on or before <b>{due_date_str}</b>.<br/>"
+                f"<b>2. ENFORCEABILITY:</b> This instrument is formally registered on the Waasz Commercial Ledger Registry. "
+                f"In the event of default beyond the agreed maturity date, the Creditor is legally authorized to record the delinquency "
+                f"across the Waasz Verified Trade Network and initiate commercial debt recovery procedures."
+            )
+
+            sign_table_data = [
+                [
+                    Paragraph("<b>CREDITOR ISSUANCE:</b>", covenant_sub_style),
+                    Paragraph("<b>DEBTOR OBLIGATION:</b>", covenant_sub_style),
+                ],
+                [
+                    Paragraph(f"<b>Business:</b> {biz_name}<br/><b>Status:</b> Digitally Issued & Verified<br/><b>Timestamp:</b> {date_str}", covenant_meta_style),
+                    Paragraph(f"<b>Debtor:</b> {cust_name}<br/><b>Phone:</b> {cust_phone or 'On File'}<br/><b>Status:</b> Obligation Registered & Delivered", covenant_meta_style),
+                ],
+            ]
+            sign_table = Table(sign_table_data, colWidths=[260, 260])
+            sign_table.setStyle(
+                TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 1),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ("LINEBEFORE", (1, 0), (1, -1), 0.5, colors.HexColor("#d1d5db")),
+                ])
+            )
+
+            iou_card_data = [
+                [Paragraph("<b>⚖️ LEGAL IOU & COMMERCIAL CREDIT OBLIGATION COVENANT</b>", covenant_heading)],
+                [Paragraph(covenant_body, covenant_text_style)],
+                [sign_table],
+                [Paragraph(f"🔒 <b>Waasz Commercial Registry Seal:</b> Verified Ledger Record Ref #{doc_number} • Cryptographically Immutable", covenant_sub_style)],
+            ]
+            iou_card = Table(iou_card_data, colWidths=[540])
+            iou_card.setStyle(
+                TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fffbeb")),
+                    ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#f59e0b")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.HexColor("#fcd34d")),
+                    ("LINEBELOW", (0, 1), (-1, 1), 0.5, colors.HexColor("#fcd34d")),
+                    ("LINEBELOW", (0, 2), (-1, 2), 0.5, colors.HexColor("#fcd34d")),
+                ])
+            )
+            elements.append(iou_card)
+            elements.append(Spacer(1, 10))
 
         # --- Footer ---
         elements.append(
@@ -789,7 +886,7 @@ class ReceiptService:
                 Transaction.status == "confirmed",
                 Transaction.occurred_at >= since_date,
             )
-            .order_by(Transaction.occurred_at.desc())
+            .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
         )
         tx_res = await db.execute(tx_stmt)
         transactions = list(tx_res.scalars().all())
@@ -802,7 +899,7 @@ class ReceiptService:
                     Transaction.business_id == business_id,
                     Transaction.status == "confirmed",
                 )
-                .order_by(Transaction.occurred_at.desc())
+                .order_by(Transaction.created_at.desc(), Transaction.occurred_at.desc())
                 .limit(50)
             )
             tx_res_fb = await db.execute(tx_fallback)
@@ -815,7 +912,7 @@ class ReceiptService:
         sales_count = sum(1 for t in transactions if t.transaction_type == "sale")
         expense_count = sum(1 for t in transactions if t.transaction_type == "expense")
 
-        debt_stmt = select(Debt).where(Debt.business_id == business_id, Debt.status == "pending")
+        debt_stmt = select(Debt).where(Debt.business_id == business_id, Debt.status.in_(["outstanding", "unpaid", "partially_paid", "pending"]))
         debt_res = await db.execute(debt_stmt)
         debts = list(debt_res.scalars().all())
         total_receivables = sum(Decimal(str(d.amount or 0)) for d in debts)

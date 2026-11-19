@@ -254,16 +254,21 @@ class DebtService:
         ref_code = f"WZ-{str(debts[0].id).split('-')[0].upper()}"
         short_link = get_short_iou_url(ref_code)
 
+        encoded_body = urllib.parse.quote(reminder_body)
         if clean_phone:
+            wa_link = f"https://wa.me/{clean_phone}?text={encoded_body}"
             action_prompt = (
                 f"📲 *1-Tap WhatsApp Forward Link:*\n"
-                f"👉 {short_link}\n\n"
+                f"👉 {wa_link}\n\n"
+                f"🔗 *Verification Link:* {short_link}\n"
                 f"_(Tap the link to open WhatsApp directly with {customer.name} and send this reminder)_"
             )
         else:
+            wa_link = f"https://wa.me/?text={encoded_body}"
             action_prompt = (
                 f"📲 *1-Tap WhatsApp Forward Link:*\n"
-                f"👉 {short_link}\n\n"
+                f"👉 {wa_link}\n\n"
+                f"🔗 *Verification Link:* {short_link}\n"
                 f"_(Tap the link to open WhatsApp, pick {customer.name}, and send this reminder)_"
             )
 
